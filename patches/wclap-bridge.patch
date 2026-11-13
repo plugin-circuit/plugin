@@ -1,0 +1,311 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6586ae7..6d0b8a9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -32,7 +32,9 @@ if(NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
+ endif()
+ target_link_libraries(wclap-bridge PRIVATE wclap-cpp webview-gui)
+ 
+-include(wasmtime-fetched.cmake)
++if(NOT TARGET wasmtime) # a parent project may provide its own Wasmtime build (e.g. for iOS)
++	include(wasmtime-fetched.cmake)
++endif()
+ 
+ target_include_directories(wclap-bridge PRIVATE wasmtime)
+ target_link_libraries(wclap-bridge PRIVATE wasmtime)
+\ No newline at end of file
+diff --git a/source/_generic/wclap-module.h b/source/_generic/wclap-module.h
+index 737ce82..4b7a54d 100644
+--- a/source/_generic/wclap-module.h
++++ b/source/_generic/wclap-module.h
+@@ -199,6 +199,13 @@ struct WclapModule : public WclapModuleBase {
+ 		wclapPortSurroundPtr = scoped.writeString(CLAP_PORT_SURROUND);
+ 		wclapPortAmbisonicPtr = scoped.writeString(CLAP_PORT_AMBISONIC);
+ 		wclapPortOtherPtr = scoped.writeString("(unknown host port type)");
++		// The host struct handed to the WCLAP: plugins check clap_version_is_compatible(host->clap_version)
++		// (e.g. JUCE-based WCLAPs refuse to create a plugin for a {0,0,0} host) and may read the strings.
++		hostTemplate.clap_version = {CLAP_VERSION_MAJOR, CLAP_VERSION_MINOR, CLAP_VERSION_REVISION};
++		hostTemplate.name = scoped.writeString("WCLAP Bridge");
++		hostTemplate.vendor = scoped.writeString("WebCLAP");
++		hostTemplate.url = scoped.writeString("https://github.com/WebCLAP/wclap-bridge");
++		hostTemplate.version = scoped.writeString("1.0.0");
+ 		hostTrackInfoPtr = scoped.copyAcross(hostTrackInfo);
+ 		hostVoiceInfoPtr = scoped.copyAcross(hostVoiceInfo);
+ 		
+@@ -252,13 +259,14 @@ struct WclapModule : public WclapModuleBase {
+ 		auto &self = *(WclapModule *)context;
+ 		auto hostExtStr = self.mainThread->getString(extId, 1024);
+ 
+-		auto *plugin = getPlugin(context, wHost);
+-		if (!plugin) return {0};
+-		
+ 		if (hostExtStr == CLAP_EXT_WEBVIEW) {
+-			// Special-cased because we provide it to the plugin even if the host doesn't
++			// Special-cased because we provide it to the plugin even if the host doesn't. Checked before the plugin
++			// lookup: WCLAPs may query it during create(), before the instance is registered (send() resolves it later).
+ 			return self.hostWebviewPtr.cast<const void>();
+ 		}
++
++		auto *plugin = getPlugin(context, wHost);
++		if (!plugin) return {0};
+ 		
+ 		const void *nativeHostExt = plugin->host->get_extension(plugin->host, hostExtStr.c_str());
+ 		if (!nativeHostExt) return {0};
+diff --git a/source/_generic/wclap-plugin.h b/source/_generic/wclap-plugin.h
+index cfac35c..410c85f 100644
+--- a/source/_generic/wclap-plugin.h
++++ b/source/_generic/wclap-plugin.h
+@@ -207,26 +207,43 @@ struct Plugin {
+ 	std::recursive_mutex hostStreamsMutex;
+ 	const clap_istream *hostIstream = nullptr;
+ 	const clap_ostream *hostOstream = nullptr;
++	// Stream proxies move the whole request in 1 kB chunks: CLAP allows short reads/writes, but many plugins
++	// assume a single call transfers everything (e.g. webview get_resource, state save/load).
+ 	int64_t istreamRead(Pointer<void> buffer, uint64_t size) {
+ 		std::unique_lock<std::recursive_mutex> lock{hostStreamsMutex};
+ 		if (!hostIstream) return -1;
+-		
+-		if (size > 1024) size = 1024; // 1kB max
++
+ 		unsigned char localBuffer[1024];
+-		auto result = hostIstream->read(hostIstream, localBuffer, size);
+-		if (result > 0 && result <= 1024) {
+-			mainThread->setArray(buffer.cast<unsigned char>(), localBuffer, result);
++		uint64_t total = 0;
++		while (total < size) {
++			auto chunk = std::min<uint64_t>(size - total, sizeof(localBuffer));
++			auto result = hostIstream->read(hostIstream, localBuffer, chunk);
++			if (result < 0) return total ? int64_t(total) : result;
++			if (result == 0) break;
++			mainThread->setArray((buffer.cast<unsigned char>() + total), localBuffer, (size_t)result);
++			total += uint64_t(result);
++			if (uint64_t(result) < chunk) break; // the host stream gave what it has
+ 		}
+-		return result;
++		return int64_t(total);
+ 	}
+ 	int64_t ostreamWrite(Pointer<const void> buffer, uint64_t size) {
+ 		std::unique_lock<std::recursive_mutex> lock{hostStreamsMutex};
+ 		if (!hostOstream) return -1;
+-		
+-		if (size > 1024) size = 1024; // 1kB max
++
+ 		unsigned char localBuffer[1024];
+-		mainThread->getArray(buffer.cast<unsigned char>(), localBuffer, size);
+-		return hostOstream->write(hostOstream, localBuffer, size);
++		uint64_t total = 0;
++		while (total < size) {
++			auto chunk = std::min<uint64_t>(size - total, sizeof(localBuffer));
++			mainThread->getArray((buffer.cast<unsigned char>() + total), localBuffer, (size_t)chunk);
++			uint64_t written = 0;
++			while (written < chunk) {
++				auto result = hostOstream->write(hostOstream, localBuffer + written, chunk - written);
++				if (result <= 0) return total + written ? int64_t(total + written) : result;
++				written += uint64_t(result);
++			}
++			total += chunk;
++		}
++		return int64_t(total);
+ 	}
+ 	std::mutex webviewMessageMutex;
+ 	std::vector<unsigned char> webviewMessageBuffer;
+@@ -262,12 +279,14 @@ private:
+ 		GET_HOST_EXT(hostVoiceInfo, CLAP_EXT_VOICE_INFO);
+ #undef GET_HOST_EXT
+ 
++		// The WCLAP must be initialised before anything queries its extensions (clap-helpers aborts otherwise)
++		if (!mainThread->call(ptr[&wclap_plugin::init], ptr)) return false;
++
+ 		// Webview -> GUI helper
+ 		webviewGui.init(&clapPlugin, host);
+ 		// Don't query the actual host - the helper does that, and provides this proxy which routes messages appropriately
+ 		hostWebview = (const clap_host_webview *)webviewGui.extHostWebview;
+-
+-		return mainThread->call(ptr[&wclap_plugin::init], ptr);
++		return true;
+ 	}
+ 	void pluginDestroy() {
+ 		mainThread->call(ptr[&wclap_plugin::destroy], ptr);
+@@ -762,27 +781,29 @@ private:
+ 	bool gui_get_preferred_api(const char **api, bool *isFloating) {
+ 		return webviewGui.getPreferredApi(api, isFloating);
+ 	}
++	bool wclapGuiCreated = false; // only call the WCLAP's gui methods between a successful create() and destroy()
+ 	bool gui_create(const char *api, bool isFloating) {
+ 		if (!webviewGui.create(api, isFloating)) return false;
+ 		if (guiExt) {
+ 			// Create a webview GUI in the WCLAP, but continue whether it succeeds or not
+ 			auto scoped = module.arenaPool.scoped();
+ 			auto str = scoped.writeString(CLAP_WINDOW_API_WEBVIEW);
+-			mainThread->call(guiExt[&wclap_plugin_gui::create], ptr, str, isFloating);
++			wclapGuiCreated = mainThread->call(guiExt[&wclap_plugin_gui::create], ptr, str, isFloating);
+ 		}
+ 		return true;
+ 	}
+ 	void gui_destroy() {
+-		if (guiExt) {
++		if (guiExt && wclapGuiCreated) {
+ 			mainThread->call(guiExt[&wclap_plugin_gui::destroy], ptr);
+ 		}
++		wclapGuiCreated = false;
+ 		webviewGui.destroy();
+ 	}
+ 	bool gui_set_scale(double scale) {
+ 		return webviewGui.setScale(scale);
+ 	}
+ 	bool gui_get_size(uint32_t *w, uint32_t *h) {
+-		if (guiExt) {
++		if (guiExt && wclapGuiCreated) {
+ 			auto scoped = module.arenaPool.scoped();
+ 			auto wPtr = scoped.copyAcross(uint32_t(0));
+ 			auto hPtr = scoped.copyAcross(uint32_t(0));
+@@ -796,13 +817,13 @@ private:
+ 		return webviewGui.getSize(w, h);
+ 	}
+ 	bool gui_can_resize() {
+-		if (guiExt) {
++		if (guiExt && wclapGuiCreated) {
+ 			return mainThread->call(guiExt[&wclap_plugin_gui::can_resize], ptr);
+ 		}
+ 		return webviewGui.canResize();
+ 	}
+ 	bool gui_get_resize_hints(clap_gui_resize_hints *hints) {
+-		if (guiExt) {
++		if (guiExt && wclapGuiCreated) {
+ 			auto scoped = module.arenaPool.scoped();
+ 			auto hintsPtr = scoped.copyAcross(wclap_gui_resize_hints{});
+ 			if (mainThread->call(guiExt[&wclap_plugin_gui::get_resize_hints], ptr, hintsPtr)) {
+@@ -814,7 +835,7 @@ private:
+ 		return webviewGui.getResizeHints(hints);
+ 	}
+ 	bool gui_adjust_size(uint32_t *w, uint32_t *h) {
+-		if (guiExt) {
++		if (guiExt && wclapGuiCreated) {
+ 			auto scoped = module.arenaPool.scoped();
+ 			auto wPtr = scoped.copyAcross(*w);
+ 			auto hPtr = scoped.copyAcross(*h);
+@@ -827,7 +848,7 @@ private:
+ 		return webviewGui.adjustSize(w, h);
+ 	}
+ 	bool gui_set_size(uint32_t w, uint32_t h) {
+-		if (guiExt) {
++		if (guiExt && wclapGuiCreated) {
+ 			mainThread->call(guiExt[&wclap_plugin_gui::set_size], ptr, w, h);
+ 		}
+ 		return webviewGui.setSize(w, h);
+@@ -839,7 +860,7 @@ private:
+ 		return webviewGui.setTransient(window);
+ 	}
+ 	void gui_suggest_title(const char *title) {
+-		if (guiExt) {
++		if (guiExt && wclapGuiCreated) {
+ 			auto scoped = module.arenaPool.scoped();
+ 			auto titlePtr = scoped.writeString(title);
+ 			mainThread->call(guiExt[&wclap_plugin_gui::suggest_title], ptr, titlePtr);
+@@ -847,13 +868,13 @@ private:
+ 		webviewGui.suggestTitle(title);
+ 	}
+ 	bool gui_show() {
+-		if (guiExt) {
++		if (guiExt && wclapGuiCreated) {
+ 			mainThread->call(guiExt[&wclap_plugin_gui::show], ptr);
+ 		}
+ 		return webviewGui.show();
+ 	}
+ 	bool gui_hide() {
+-		if (guiExt) {
++		if (guiExt && wclapGuiCreated) {
+ 			mainThread->call(guiExt[&wclap_plugin_gui::hide], ptr);
+ 		}
+ 		return webviewGui.hide();
+@@ -1153,8 +1174,33 @@ private:
+ 		return result;
+ 	}
+ 	bool webview_get_resource(const char *path, char *mime, uint32_t mimeCapacity, const clap_ostream *ostream) {
+-		if (wasFileUri) {
+-			auto mapped = module.instanceGroup->mapPath(path);
++		if (wasFileUri) return serveFile(path, path, mime, mimeCapacity, ostream);
++		if (webviewGetResourceFromPlugin(path, mime, mimeCapacity, ostream)) return true;
++		// Relative URIs whose resources the WCLAP doesn't provide come from its bundle (e.g. the JUCE-kit ports,
++		// whose get_resource returns false: "hosts serve the bundle").
++		if (path[0] != '/') return false;
++		return serveFile((std::string("/plugin.wclap") + path).c_str(), path, mime, mimeCapacity, ostream);
++	}
++	bool serveFile(const char *virtualPath, const char *path, char *mime, uint32_t mimeCapacity, const clap_ostream *ostream) {
++		{
++			// URLs arrive percent-encoded (e.g. `%20` for file names with spaces)
++			std::string decoded;
++			for (const char *c = virtualPath; *c && *c != '?' && *c != '#'; ++c) {
++				auto hex = [](char h) -> int {
++					if (h >= '0' && h <= '9') return h - '0';
++					if (h >= 'a' && h <= 'f') return h - 'a' + 10;
++					if (h >= 'A' && h <= 'F') return h - 'A' + 10;
++					return -1;
++				};
++				if (c[0] == '%' && c[1] && c[2] && hex(c[1]) >= 0 && hex(c[2]) >= 0) {
++					decoded += char(hex(c[1]) * 16 + hex(c[2]));
++					c += 2;
++				} else {
++					decoded += *c;
++				}
++			}
++			if (decoded.find("..") != std::string::npos) return false; // stay inside the mounted dirs
++			auto mapped = module.instanceGroup->mapPath(decoded);
+ 			if (!mapped) return false;
+ 			for (size_t i = 0; i < mapped->size(); ++i) {
+ 				auto c = (*mapped)[i];
+@@ -1197,7 +1243,9 @@ private:
+ 			std::cerr << "WCLAP: couldn't read file: " << *mapped << std::endl;
+ 			return false;
+ 		}
+-
++	}
++	bool webviewGetResourceFromPlugin(const char *path, char *mime, uint32_t mimeCapacity, const clap_ostream *ostream) {
++		{
+ 		auto scoped = module.arenaPool.scoped();
+ 		auto streamPtr = scoped.copyAcross(module.ostreamTemplate);
+ 		module.setPlugin(streamPtr, pluginListIndex);
+@@ -1210,6 +1258,7 @@ private:
+ 		mainThread->getArray(mimePtr, mime, mimeCapacity);
+ 		hostOstream = nullptr;
+ 		return result;
++		}
+ 	}
+ 	bool webview_receive(const void *buffer, uint32_t size) {
+ 		auto scoped = module.arenaPool.scoped();
+diff --git a/source/wclap-instance-wasmtime/wclap-instance-wasmtime.cpp b/source/wclap-instance-wasmtime/wclap-instance-wasmtime.cpp
+index e5832fd..6ae834a 100644
+--- a/source/wclap-instance-wasmtime/wclap-instance-wasmtime.cpp
++++ b/source/wclap-instance-wasmtime/wclap-instance-wasmtime.cpp
+@@ -1,3 +1,5 @@
++#include <string>
++#include <cstdlib>
+ #include "./wclap-instance-wasmtime.h"
+ 
+ #include <atomic>
+@@ -41,6 +43,25 @@ bool wclap_wasmtime::InstanceGroup::globalInit(unsigned int timeLimitMs) {
+ 		return false;
+ 	}
+ 
++	// WCLAP_WASMTIME_TARGET=pulley64 runs WCLAPs on Wasmtime's portable interpreter (no executable memory:
++	// what an iOS device needs). Default: the native Cranelift backend.
++	if (const char *target = std::getenv("WCLAP_WASMTIME_TARGET"); target && *target) {
++		if (auto *targetError = wasmtime_config_target_set(config, target)) {
++			logError(targetError);
++			wasmtime_error_delete(targetError);
++		}
++	}
++
++	// WCLAP_WASMTIME_OPT=none|speed|speed_and_size: Cranelift optimisation level (default speed)
++	if (const char *opt = std::getenv("WCLAP_WASMTIME_OPT"); opt && *opt) {
++		std::string o = opt;
++		wasmtime_config_cranelift_opt_level_set(config, o == "none" ? WASMTIME_OPT_LEVEL_NONE
++			: o == "speed_and_size" ? WASMTIME_OPT_LEVEL_SPEED_AND_SIZE : WASMTIME_OPT_LEVEL_SPEED);
++	}
++
++	// Many WCLAPs are C++ built with -fwasm-exceptions (e.g. JUCE ports): enable the exceptions proposal
++	wasmtime_config_wasm_exceptions_set(config, true);
++
+ 	if (timeLimitMs > 0) {
+ 		// enable epoch_interruption to prevent WCLAPs locking everything up - has a speed cost (10% according to docs)
+ 		wasmtime_config_epoch_interruption_set(config, true);

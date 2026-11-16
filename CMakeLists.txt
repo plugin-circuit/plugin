@@ -86,6 +86,7 @@ add_library(plugincircuit-core STATIC
 	src/core/Catalog.cpp
 	src/core/PackageCache.cpp
 	src/core/Settings.cpp
+	src/api/Api.cpp
 	src/core/Paths.cpp
 	src/core/WclapLibrary.cpp
 	src/core/InnerHost.cpp)
@@ -103,6 +104,7 @@ if (PLUGINCIRCUIT_BUILD_PLUGIN)
 add_library(plugincircuit-impl STATIC
 	src/plugin/Factory.cpp
 	src/plugin/PluginCircuitPlugin.cpp
+	src/plugin/PluginApi.cpp
 	src/plugin/Macros.cpp
 	src/plugin/StateCodec.cpp
 	src/gui/Editor.mm
@@ -176,10 +178,16 @@ add_test(NAME param-table COMMAND plugincircuit-param-table-test)
 add_executable(plugincircuit-gestures-test tests/gestures_test.cpp src/plugin/Macros.cpp)
 target_include_directories(plugincircuit-gestures-test PRIVATE src ${wclap-bridge_SOURCE_DIR}/modules/clap/include)
 add_test(NAME gestures COMMAND plugincircuit-gestures-test)
+# the API registry (stores, commands, streams) without a webview
+add_executable(plugincircuit-api-test tests/api_test.cpp src/api/Api.cpp)
+target_include_directories(plugincircuit-api-test PRIVATE src ${CHOC_DIR})
+add_test(NAME api COMMAND plugincircuit-api-test)
 # host UI: only the catalog's picker iframe may load plugins (headless Chromium, via the website's Playwright)
 find_program(BUN_EXECUTABLE bun)
 if (BUN_EXECUTABLE AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../website/node_modules/@playwright/test)
 	add_test(NAME host-ui-picker-messages COMMAND ${BUN_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/host-ui/picker_messages.ts)
+	# the views render from the API's stores and follow their patches (PLAN.md phase 3)
+	add_test(NAME host-ui-stores COMMAND ${BUN_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/host-ui/stores.ts)
 endif()
 # The WCLAP's tail is read and reported (a bundle dir of a delay or reverb, e.g. OpenRB Delay)
 set(PLUGINCIRCUIT_TEST_TAIL_WCLAP "" CACHE PATH "Bundle dir of a WCLAP with a tail (delay/reverb) for the tail test")

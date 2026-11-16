@@ -6,17 +6,12 @@
 //
 // Run: bun tests/host-ui/picker_messages.ts   (uses Playwright from ../website/node_modules)
 import { join } from "node:path"
+import { defaultStores, installMockHost, serveHostUi } from "./mock_host"
 
 const playwright = await import(join(import.meta.dir, "../../../website/node_modules/@playwright/test/index.mjs"))
 const root = join(import.meta.dir, "../../host-ui")
 
-const host = Bun.serve({
-  port: 0,
-  fetch(req) {
-    const path = new URL(req.url).pathname
-    return new Response(Bun.file(root + (path === "/" ? "/index.html" : path)))
-  },
-})
+const host = serveHostUi(root)
 const select = (id: string) => `<script>parent.postMessage({type: "plugincircuit:select", pluginId: "${id}"}, "*")</script>`
 const catalog = Bun.serve({
   port: 0,
@@ -35,21 +30,9 @@ const rogue = Bun.serve({
 
 const browser = await playwright.chromium.launch()
 const page = await browser.newPage()
-await page.addInitScript(() => {
-  ;(window as any).__loads = []
-  ;(window as any).plugincircuitCall = (method: string, args: any) => {
-    if (method === "load") (window as any).__loads.push(args.pluginId)
-    return Promise.resolve(true)
-  }
-})
+// the core: no plugin, the Browse view, the fake catalog
+await page.addInitScript(installMockHost, { stores: defaultStores(`http://127.0.0.1:${catalog.port}`) })
 await page.goto(`http://127.0.0.1:${host.port}/`)
-const snapshot = {
-  version: 1, status: "empty", message: "", progress: 0, instrument: true, apiBase: `http://127.0.0.1:${catalog.port}`,
-  hostTransport: true, transportPlaying: false, macroValues: Array(64).fill(0), paramValues: [], params: [],
-  macros: Array.from({ length: 64 }, () => ({ name: "", custom: false, targets: [] })), autoMapped: true, installed: [],
-  view: "browse", innerGui: false, keyboard: false, plugin: null,
-}
-await page.evaluate((s: unknown) => (window as any).plugincircuitHost.update(s), snapshot)
 
 // a rogue frame from another origin, and a same-origin frame that isn't the picker, both send select
 await page.evaluate((src: string) => {
@@ -64,7 +47,8 @@ await page.evaluate(() => {
 })
 await page.waitForTimeout(1500) // the picker loads after the health check
 
-const loads: string[] = await page.evaluate(() => (window as any).__loads)
+const loads: string[] = await page.evaluate(() =>
+  (window as any).__requests.filter((r: any) => r.name === "plugin.load").map((r: any) => r.args.pluginId))
 const ok = loads.length === 1 && loads[0] === "from.picker"
 console.log(`loads: ${JSON.stringify(loads)}`)
 console.log(ok ? "PASS: only the picker's message loaded a plugin" : "FAIL: expected exactly [\"from.picker\"]")

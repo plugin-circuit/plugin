@@ -1,23 +1,28 @@
-// Plugin Circuit host UI. Talks to the native plugin through one CHOC binding:
-//   plugincircuitCall(method, payload) -> Promise   (JS -> C++)
-//   window.plugincircuitHost.update(snapshot)        (C++ -> JS, ~20 Hz; `macros`/`params` only in full snapshots)
+// Plugin Circuit host UI. Talks to the core through the one API (api.js, docs/MESSAGING.md): it subscribes to stores
+// (plugin, params, macros, transport, ui, settings, cache) and the perf stream, sends commands, and edits values
+// with gestures (`edit`).
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const call = (method, payload = {}) =>
-  typeof window.plugincircuitCall === "function" ? window.plugincircuitCall(method, payload) : Promise.resolve(null);
+// a command whose failure is logged, not thrown (the UI goes on)
+const command = (name, args = {}) => api.command(name, args).catch((e) => { log(`${name} failed:`, e.message); return null; });
 
 // a plugin UI, not a web page: no browser context menu (Reload, Inspect Element, ...)
 window.addEventListener("contextmenu", (e) => e.preventDefault(), { capture: true });
 
 // forward page errors to the native log (stderr / host log)
-const log = (...a) => call("log", { text: a.map(String).join(" ") });
+const log = (...a) => api.command("app.log", { text: a.map(String).join(" ") }).catch(() => {});
 window.addEventListener("error", (e) => log("error:", e.message, e.filename + ":" + e.lineno));
 window.addEventListener("unhandledrejection", (e) => log("rejection:", e.reason));
 
 const PAGE = 16;
 const state = {
-  snap: null,          // last full snapshot (macros, params, plugin, installed ...)
+  // what the stores say, in one object for the views: plugin (status, message, progress, instrument, apiBase, plugin,
+  // missing, installed), macros (macros, autoMapped), params (params: infos), transport, ui (innerGui)
+  snap: {
+    status: "empty", message: "", progress: 0, instrument: false, apiBase: "", plugin: null, missing: null, installed: [],
+    macros: [], autoMapped: true, params: [], hostTransport: true, transportPlaying: false, innerGui: false,
+  },
   values: [],          // macro values 0..1
   paramValues: new Map(), // id -> {value, text}
   view: "browse",
@@ -28,51 +33,68 @@ const state = {
   wasLoading: false,
 };
 
-// ---------------------------------------------------------------- host -> UI
-window.plugincircuitHost = {
-  update(s) {
-    const full = Array.isArray(s.macros);
-    if (full) state.snap = s;
-    else if (state.snap) Object.assign(state.snap, { status: s.status, message: s.message, progress: s.progress, version: s.version,
-      hostTransport: s.hostTransport, transportPlaying: s.transportPlaying });
-    s.macroValues.forEach((v, i) => { if (!state.dragging.has("m" + i)) state.values[i] = v; });
+// ---------------------------------------------------------------- core -> UI: stores
+// texts come only for parameters the page shows (phase 1b): a value without one keeps the row's last text if the
+// value is the same, else none (the core sends it when the row comes into view)
+function mergeParamValues(values) {
+  for (const pv of values) {
+    const cur = state.paramValues.get(pv.id);
+    if (pv.text === undefined) pv.text = cur && cur.value === pv.value ? cur.text : "";
     // while a param is dragged its value is ours, but its text is always the plugin's
-    // texts come only for parameters the page shows (phase 1b): a value without one keeps the row's last text if the
-    // value is the same, else none (the core sends it when the row comes into view)
-    for (const pv of s.paramValues) {
-      const cur = state.paramValues.get(pv.id);
-      if (pv.text === undefined) pv.text = cur && cur.value === pv.value ? cur.text : "";
-      if (!state.dragging.has("p" + pv.id) || !cur) state.paramValues.set(pv.id, pv);
-      else if (cur.value === pv.value) cur.text = pv.text;
-    }
-    if (s.view && (s.view !== state.view || !state.initialised) && !recentlyChanged("view")) { state.initialised = true; setView(s.view, false); }
-    if (typeof s.keyboard === "boolean" && !recentlyChanged("keyboard")) showKeyboard(s.keyboard, false);
-    if (recentlyChanged("transport") && state.snap) state.snap.transportPlaying = state.localTransport;
-    render(full);
-  },
-};
+    if (!state.dragging.has("p" + pv.id) || !cur) state.paramValues.set(pv.id, pv);
+    else if (cur.value === pv.value) cur.text = pv.text;
+  }
+}
 
-// Snapshots are built natively and delivered asynchronously, so one built before a click can arrive after it.
-// For a short while after a local change, snapshot values for that field are ignored.
-const localChanges = new Map();
-const markLocal = (field) => localChanges.set(field, performance.now());
-const recentlyChanged = (field) => performance.now() - (localChanges.get(field) ?? -1e9) < 400;
+let macroShape = "";
+function subscribeStores() {
+  api.subscribe("plugin", (v) => {
+    const pluginChanged = JSON.stringify(v.plugin) !== JSON.stringify(state.snap.plugin);
+    Object.assign(state.snap, v);
+    render(pluginChanged);
+    renderInstalled();
+  });
+  api.subscribe("macros", (v) => {
+    state.snap.macros = v.macros;
+    state.snap.autoMapped = v.autoMapped;
+    v.values.forEach((x, i) => { if (!state.dragging.has("m" + i)) state.values[i] = x; });
+    const shape = JSON.stringify([v.macros, v.autoMapped]);
+    const rebuild = shape !== macroShape; // names or targets changed (the Params view's macro tags too)
+    macroShape = shape;
+    render(rebuild);
+  });
+  api.subscribe("params", (d) => {
+    if (d.full) { state.snap.params = d.infos; state.paramValues = new Map(); }
+    mergeParamValues(d.values);
+    render(d.full);
+  });
+  api.subscribe("transport", (v) => {
+    state.snap.hostTransport = v.host;
+    state.snap.transportPlaying = v.playing;
+    render(false);
+  });
+  api.subscribe("ui", (v) => {
+    state.snap.innerGui = v.innerGui;
+    // the first value always applies: the page starts on "browse", and entering a view does its work (the picker)
+    if (v.view !== state.view || !state.initialised) { state.initialised = true; setView(v.view, false); }
+    showKeyboard(v.keyboard, false);
+    render(false);
+  });
+}
 
 // ---------------------------------------------------------------- views
 function setView(view, tellHost = true) {
-  if (tellHost) markLocal("view");
   state.view = view;
   document.body.dataset.view = view;
   for (const b of document.querySelectorAll(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.view === view));
   $("pluginPill").setAttribute("aria-pressed", String(view === "browse"));
   if (view === "browse") ensurePicker();
   $("settingsBtn").setAttribute("aria-pressed", String(view === "settings"));
-  if (view === "settings") { loadCaches(); loadSettings(); }
-  if (window.__perf) window.__perf.active(view === "settings");
+  if (window.__settings) window.__settings.active(view === "settings"); // its stores and stream only while shown
   if (typeof scheduleVisibleParams === "function") scheduleVisibleParams(); // entering Params: rows + texts; leaving: none
   if (tellHost) {
     if (window.__debugViews) log("setView", view, new Error().stack.split("\n").slice(1, 4).join(" < "));
-    call("view", { view });
+    api.set("ui", { view }).catch((e) => log("view:", e.message));
   }
 }
 
@@ -100,7 +122,7 @@ window.addEventListener("message", (e) => {
   if (!fromPicker(e)) return;
   const d = e.data || {};
   if (d.type === "plugincircuit:select" && d.pluginId) {
-    call("load", { pluginId: d.pluginId, sha256: d.sha256 || "" });
+    command("plugin.load", { pluginId: d.pluginId, sha256: d.sha256 || "" });
     state.pickerSrc = ""; // the iframe now shows "Picked …": reload the picker next time
     setView("plugin");
   } else if (d.type === "plugincircuit:cancel") {
@@ -264,7 +286,7 @@ function updateKnobs() { for (const el of document.querySelectorAll(".knob")) up
 
 // shared drag behaviour (knobs vertical, sliders horizontal); shift = fine; double-click = reset
 // One way to change a value (docs/MESSAGING.md): phase "begin" / "update" / "end" for a drag, "set" for a single change.
-function edit(target, id, value, phase) { call("edit", { target, id, value, phase }); }
+function edit(target, id, value, phase) { command("edit", { target, id, value, phase }); }
 
 // set(value, phase) is called with "begin" on press, "update" while moving, "end" on release
 function bindDrag(target, key, get, set, axis, reset) {
@@ -340,7 +362,7 @@ function renderTargets() {
     row.className = "t";
     row.innerHTML = `<span></span><button title="Remove">×</button>`;
     row.firstChild.textContent = p ? p.name : `#${t.id}`;
-    row.lastChild.onclick = () => call("unmapMacro", { slot: state.editSlot, paramId: t.id });
+    row.lastChild.onclick = () => command("macros.unmap", { slot: state.editSlot, paramId: t.id });
     root.appendChild(row);
   }
 }
@@ -351,22 +373,22 @@ function mapSelected(add) {
   if (!p) return;
   const lo = +$("mapMin").value, hi = +$("mapMax").value;
   const span = p.max - p.min;
-  call("mapMacro", { slot: state.editSlot, paramId: id, min: p.min + span * lo, max: p.min + span * hi, add: add ? 1 : 0 });
+  command("macros.map", { slot: state.editSlot, paramId: id, min: p.min + span * lo, max: p.min + span * hi, add: add ? 1 : 0 });
 }
 $("mapReplace").onclick = () => mapSelected(false);
 $("mapAdd").onclick = () => mapSelected(true);
-$("mapClear").onclick = () => call("unmapMacro", { slot: state.editSlot, paramId: -1 });
+$("mapClear").onclick = () => command("macros.unmap", { slot: state.editSlot, paramId: -1 });
 $("closePop").onclick = () => closePopover();
 $("macroName").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { call("renameMacro", { slot: state.editSlot, name: e.target.value.trim() }); closePopover(); }
+  if (e.key === "Enter") { command("macros.rename", { slot: state.editSlot, name: e.target.value.trim() }); closePopover(); }
   if (e.key === "Escape") closePopover();
 });
-$("macroName").addEventListener("change", (e) => call("renameMacro", { slot: state.editSlot, name: e.target.value.trim() }));
+$("macroName").addEventListener("change", (e) => command("macros.rename", { slot: state.editSlot, name: e.target.value.trim() }));
 function closePopover() { $("mapPopover").hidden = true; state.editSlot = -1; }
 document.addEventListener("pointerdown", (e) => {
   if (!$("mapPopover").hidden && !$("mapPopover").contains(e.target) && !e.target.closest(".more")) closePopover();
 });
-$("autoMap").onclick = () => call("autoMap");
+$("autoMap").onclick = () => command("macros.autoMap");
 
 // ---- params
 function macroForParam(id) {
@@ -418,7 +440,7 @@ function paramRow(p) {
     const next = { ...pv, value: v }; // keep the last text until the plugin formats this value
     state.paramValues.set(p.id, next);
     edit("param", p.id, v, phase);
-    Promise.resolve(call("paramText", { id: p.id, value: v })).then((t) => {
+    api.command("params.text", { id: p.id, value: v }).then((t) => {
       if (typeof t === "string" && t && state.paramValues.get(p.id) === next) { next.text = t; updateParam(row, p); }
     }).catch(() => {});
     updateParam(row, p);
@@ -455,7 +477,7 @@ function sendVisibleParams(ids) {
   const key = ids.join(",");
   if (key === prows.sentIds) return;
   prows.sentIds = key;
-  call("visibleParams", { ids });
+  command("params.visible", { ids });
 }
 // on the next frame, or after 50 ms if WebKit throttles frames (a window it considers hidden)
 let visiblePending = false;
@@ -497,7 +519,7 @@ function renderInstalled() {
     b.innerHTML = `<span></span><small></small>`;
     b.firstChild.textContent = p.name || p.id;
     b.lastChild.textContent = p.vendor || "";
-    b.onclick = () => { call("load", { pluginId: p.id, sha256: p.sha256 }); setView("plugin"); };
+    b.onclick = () => { command("plugin.load", { pluginId: p.id, sha256: p.sha256 }); setView("plugin"); };
     root.appendChild(b);
   }
 }
@@ -507,16 +529,16 @@ for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => set
 // the plugin pill opens the picker; with a plugin loaded, a second click goes back to it
 $("pluginPill").onclick = () => setView(state.view === "browse" && document.body.classList.contains("has-plugin") ? "plugin" : "browse");
 for (const b of document.querySelectorAll("[data-goto]")) b.onclick = () => setView(b.dataset.goto);
-$("unload").onclick = () => call("unload");
+$("unload").onclick = () => command("plugin.unload");
 $("openCatalog").onclick = () => {
   const p = state.snap && state.snap.plugin;
-  if (p) call("openUrl", { url: `${apiBase()}/plugins/${encodeURIComponent(p.id)}` });
+  if (p) command("app.openUrl", { url: `${apiBase()}/plugins/${encodeURIComponent(p.id)}` });
 };
 $("retryCatalog").onclick = () => ensurePicker(true);
 $("refreshCatalog").onclick = () => ensurePicker(true);
 $("retryLoad").onclick = () => {
   const m = state.snap && state.snap.missing;
-  if (m) call("load", { pluginId: m.id, sha256: m.sha256 || "" });
+  if (m) command("plugin.load", { pluginId: m.id, sha256: m.sha256 || "" });
 };
 // Text entry only: the velocity slider is an <input type=range> and must not swallow note keys.
 const isTextEntry = (el) => el instanceof Element && el.matches("input:not([type=range]):not([type=checkbox]), select, textarea, [contenteditable]");
@@ -535,7 +557,7 @@ window.addEventListener("pagehide", () => kbd.allOff());
 document.addEventListener("visibilitychange", () => { if (document.hidden) kbd.allOff(); });
 
 // ---------------------------------------------------------------- on-screen keyboard (instruments)
-// Notes go to the plugin through plugincircuitCall("note") -> the lock-free UI queue -> the next process block.
+// Notes go to the plugin through the keyboard.note command -> the lock-free UI queue -> the next process block.
 const kbd = {
   open: false,
   base: 48,          // lowest key shown: C3
@@ -546,14 +568,14 @@ const kbd = {
     if (key < 0 || key > 127 || this.down.has(key)) return;
     this.down.set(key, source);
     this.sent.add(key);
-    call("note", { key, on: 1, velocity: Number($("velocity").value) / 127 });
+    command("keyboard.note", { key, on: 1, velocity: Number($("velocity").value) / 127 });
     paintKey(key, true);
   },
   noteOff(key) {
     if (!this.down.has(key)) return;
     this.down.delete(key);
     this.sent.delete(key);
-    call("note", { key, on: 0, velocity: 0 });
+    command("keyboard.note", { key, on: 0, velocity: 0 });
     paintKey(key, false);
   },
   allOff() { heldCodes.clear(); for (const key of [...this.down.keys()]) this.noteOff(key); },
@@ -644,7 +666,8 @@ function kbdCode(code, down) {
   kbd.noteOn(key, code);
   return true;
 }
-window.plugincircuitHost.key = (code, down) => kbdCode(code, down);
+// keys typed into the hosted plugin's GUI, copied here by the editor (Editor.mm, forwardNoteKey)
+window.plugincircuitHost = { key: (code, down) => kbdCode(code, down) };
 
 function shiftOctave(d) {
   const base = Math.min(127 - kbd.octaves * 12 - (127 - kbd.octaves * 12) % 12, Math.max(0, kbd.base + d * 12)); // top key <= 127
@@ -663,30 +686,32 @@ function showKeyboard(open, tellHost = true) {
   document.body.classList.toggle("kbd-open", open);
   $("kbdToggle").setAttribute("aria-pressed", String(open));
   if (open) buildKeys();
-  if (tellHost) call("keyboard", { open: open ? 1 : 0 });
+  if (tellHost) api.set("ui", { keyboard: open }).catch((e) => log("keyboard:", e.message));
 }
-// user toggles: guard them against stale snapshots (automatic closes, e.g. no note input, are not guarded)
-const userToggleKeyboard = () => { markLocal("keyboard"); showKeyboard(!kbd.open); };
+const userToggleKeyboard = () => showKeyboard(!kbd.open);
 $("kbdToggle").onclick = userToggleKeyboard;
 function toggleTransport() {
-  const playing = !(state.snap && state.snap.transportPlaying);
-  if (state.snap) state.snap.transportPlaying = playing;
-  state.localTransport = playing;
-  markLocal("transport");
+  const playing = !state.snap.transportPlaying;
+  state.snap.transportPlaying = playing;
   $("transportToggle").setAttribute("aria-pressed", String(playing));
-  call("transport", { playing: playing ? 1 : 0 });
+  api.set("transport", { playing }).catch((e) => log("transport:", e.message));
 }
 $("transportToggle").onclick = toggleTransport;
 
 document.body.dataset.view = "browse";
-call("ready");
+// the handshake, then the stores; a page and a plugin that don't speak the same protocol say so instead of half-working
+api.hello().then(subscribeStores).catch((e) => {
+  document.body.innerHTML = `<div style="padding:24px;font:13px system-ui;color:#ccc;background:#111;height:100vh">
+    Plugin Circuit's interface doesn't match this plugin build.<br><span style="opacity:.6"></span></div>`;
+  document.body.querySelector("span").textContent = e.message;
+});
 
 // the wordmark opens the catalog website in the default browser
 {
   const brand = document.querySelector(".brand");
   brand.title = "Open the Plugin Circuit website";
   brand.setAttribute("role", "link");
-  brand.addEventListener("click", () => call("openUrl", { url: apiBase() + "/" }));
+  brand.addEventListener("click", () => command("app.openUrl", { url: apiBase() + "/" }));
 }
 
 // ---------------------------------------------------------------- settings: caches
@@ -709,9 +734,7 @@ function formatAgo(t) {
 }
 const unused = (p) => !p.inUse && Date.now() / 1000 - Math.max(p.lastUsed, p.lastSaved) > 30 * DAY;
 
-async function loadCaches() {
-  let r;
-  try { r = await call("cacheList"); } catch (e) { r = null; }
+function onCache(r) { // the cache store
   if (!r || !Array.isArray(r.packages)) { $("cacheSummary").textContent = "Not available"; return; }
   cache.list = r.packages.sort((a, b) => Math.max(b.lastUsed, b.lastSaved) - Math.max(a.lastUsed, a.lastSaved));
   for (const sha of [...cache.selected]) if (!cache.list.some((p) => p.sha256 === sha && !p.inUse)) cache.selected.delete(sha);
@@ -773,9 +796,8 @@ function confirmFirst(button, label, action) {
 
 async function deletePackages(shas) {
   if (!shas.length) return;
-  const r = await call("cacheDelete", { shas });
+  const r = await command("cache.delete", { shas }); // the list follows as a patch
   for (const sha of shas) cache.selected.delete(sha);
-  await loadCaches();
   const skipped = r && Array.isArray(r.skipped) ? r.skipped.length : 0;
   $("cacheNote").textContent = `Deleted ${r ? r.deleted : 0}${skipped ? `, skipped ${skipped} in use` : ""}. A deleted plugin is downloaded again when a session needs it.`;
 }
@@ -787,7 +809,7 @@ $("cacheDeleteUnused").onclick = confirmFirst($("cacheDeleteUnused"), () => `Del
 $("cacheDeleteAll").onclick = confirmFirst($("cacheDeleteAll"), () => `Delete all ${cache.list.filter((p) => !p.inUse).length}? Click again`,
   () => deletePackages(cache.list.filter((p) => !p.inUse).map((p) => p.sha256)));
 $("cacheClearCompiled").onclick = confirmFirst($("cacheClearCompiled"), () => "Clear? Click again",
-  async () => { await call("cacheClearCompiled"); loadCaches(); });
+  () => command("cache.clearCompiled"));
 
 // ---------------------------------------------------------------- settings: advanced
 {
@@ -798,32 +820,31 @@ $("cacheClearCompiled").onclick = confirmFirst($("cacheClearCompiled"), () => "C
     o.textContent = p === 0 ? "Off (try once)" : `${p}% of a block${p === 20 ? " (default)" : ""}`;
     sel.appendChild(o);
   }
-  sel.onchange = async () => { await call("settingsSet", { audioWaitRatio: Number(sel.value) }); loadSettings(); };
-  $("concealDropouts").onchange = async (e) => { await call("settingsSet", { concealDropouts: e.target.checked }); loadSettings(); };
+  sel.onchange = () => api.set("settings", { audioWaitRatio: Number(sel.value) }).catch((e) => log("settings:", e.message));
+  $("concealDropouts").onchange = (e) => api.set("settings", { concealDropouts: e.target.checked }).catch((err) => log("settings:", err.message));
 }
-async function loadSettings() {
-  let s;
-  try { s = await call("settingsGet"); } catch (e) { s = null; }
+function onSettings(s) { // the settings store
   if (!s || typeof s.audioWaitRatio !== "number") return;
   $("audioWait").value = String(Math.round(s.audioWaitRatio * 10) / 10);
   $("concealDropouts").checked = s.concealDropouts !== false;
-  $("audioWaitNote").textContent = s.skippedBlocks
-    ? `${s.skippedBlocks} block${s.skippedBlocks === 1 ? "" : "s"} skipped since Plugin Circuit started. More than a few while you work: raise the wait.`
+}
+function showSkipped(skipped) { // from the perf stream
+  $("audioWaitNote").textContent = skipped
+    ? `${skipped} block${skipped === 1 ? "" : "s"} skipped since Plugin Circuit started. More than a few while you work: raise the wait.`
     : "No blocks skipped since Plugin Circuit started.";
 }
 
 // ---------------------------------------------------------------- settings: performance
-// DSP load per poll (10 Hz) = average of each block's time / its real-time duration; the last 60 s are drawn.
+// DSP load per sample (the perf stream, 10 Hz) = average of each block's time / its real-time duration; the last 60 s are drawn.
 // Reached as window.__perf: setView() may run before this file has finished evaluating.
 const perf = (window.__perf = (() => {
-  const N = 600, POLL_MS = 100;
+  const N = 600;
   const hist = []; // {load, peak, skipped, over}
-  let last = null, timer = null, totals = { skipped: 0, over: 0 }, base = null;
+  let last = null, totals = { skipped: 0, over: 0 }, base = null;
 
-  async function poll() {
-    let r;
-    try { r = await call("perfGet"); } catch (e) { return; }
+  function sample(r) { // the perf stream, 10 Hz while the settings page is shown
     if (!r || typeof r.blocks !== "number") return;
+    showSkipped(r.skipped);
     if (!base) base = { skipped: r.skipped, over: r.overBudget };
     if (last) {
       const blocks = r.blocks - last.blocks;
@@ -890,16 +911,22 @@ const perf = (window.__perf = (() => {
     });
   }
 
-  $("perfReset").onclick = () => { hist.length = 0; base = null; last = null; poll(); };
+  $("perfReset").onclick = () => { hist.length = 0; base = null; last = null; draw(); };
+  return { redraw: draw, sample };
+})());
+
+// The settings page's stores and stream, subscribed only while it is shown. Reached as window.__settings: setView()
+// may run before this file has finished evaluating.
+window.__settings = (() => {
+  let subs = [];
   return {
-    redraw: draw,
     active(on) {
-      if (on && !timer) { poll(); timer = setInterval(poll, POLL_MS); }
-      else if (!on && timer) { clearInterval(timer); timer = null; }
+      if (on && !subs.length) subs = [api.subscribe("cache", onCache), api.subscribe("settings", onSettings), api.onStream("perf", perf.sample)];
+      else if (!on && subs.length) { subs.forEach((off) => off()); subs = []; }
     },
   };
-})());
-if (state.view === "settings") perf.active(true);
+})();
+if (state.view === "settings") window.__settings.active(true);
 
 // ---------------------------------------------------------------- settings: tabs (on the right)
 {

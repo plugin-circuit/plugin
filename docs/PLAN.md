@@ -146,6 +146,23 @@ applied or dropped, what the DAW receives). An integration test with a fake host
 
 ## Phase 3: one API — stores, commands, streams — L
 
+Status: done. `src/api/Api.h` (the registry, one per page), `src/plugin/PluginApi.cpp` (the plugin's stores
+`plugin`, `params`, `macros`, `transport`, `settings`, `cache`, its commands and the `perf` stream), the editor's
+`ui` store and `plugin.load` / `plugin.unload` / `app.*`. `Editor.mm` has no snapshot and no dispatch left; the
+page talks through `plugincircuitRequest` / `plugincircuitReceive` (`host-ui/api.js`). Decisions on the way:
+- Plain stores are re-read when a cheap stamp changes; `params` is a delta store (the table's changed bits).
+- Macro mapping stays commands (`macros.map` / `unmap` / `rename` / `autoMap`), not `macros` `set`.
+- `params.text` stays as a command: a drag shows the plugin's text at once (the store leaves UI-owned values out).
+- A `set`'s reply carries the store's version: patches arriving while it is in flight are held, and the newest is
+  applied if it follows the set (switching to the plugin view creates its GUI: that patch carries more than the view).
+- The views read the stores into one `state.snap` and keep their render code; the settings page subscribes to
+  `cache`, `settings` and `perf` only while shown. The 400 ms guards are gone.
+Tests: `api` (registry), `host-ui-stores` (14 checks: views from stores, deltas, stale patches, a set racing its
+patches, subscriptions while shown), `host-ui-picker-messages` on the mock core, the GUI tests unchanged.
+Found by the picker test: the first `ui` value must apply even when the view matches the page's default (else the
+picker never loads). Open: 2.4's `ack` at a gesture's end (the UI still waits 120 ms after a drag before taking
+values again).
+
 **3.1 `src/api/Api.h/.cpp`: the registry**, the only dispatch the editor calls.
 - `store(name, schema?, get, set)` with a version per store; `patch` = the changed part plus the new version.
 - `command(name, handler)` → `{ok, result | error}`.

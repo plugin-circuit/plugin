@@ -148,8 +148,9 @@ gets focus). Values the audio thread needs (the wait ratio) are pushed to it as 
 | `load`, `unload` | commands `plugin.load`, `plugin.unload` (store `plugin` for status) |
 | `view`, `keyboard` | store `ui` (instance scope) |
 | `setMacro`, `setParam` | `edit` (gestures) |
-| `paramText` | gone: texts arrive with `params` patches |
-| `mapMacro`, `unmapMacro`, `renameMacro`, `autoMap` | store `macros` (`set`) and command `macros.autoMap` |
+| `paramText` | command `params.text` while dragging (a UI-owned value isn't in the patches); else texts arrive with `params` patches |
+| `visibleParams` | command `params.visible` |
+| `mapMacro`, `unmapMacro`, `renameMacro`, `autoMap` | commands `macros.map` / `macros.unmap` / `macros.rename` / `macros.autoMap` (store `macros` to read) |
 | `note` | `edit`-like input `keyboard.note` (to the audio thread) |
 | `transport` | store `transport` |
 | `cacheList`, `cacheDelete`, `cacheClearCompiled` | store `cache`, commands `cache.delete`, `cache.clearCompiled` |

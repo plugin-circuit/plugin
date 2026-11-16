@@ -33,6 +33,7 @@
 namespace plugincircuit {
 
 class Editor;
+class Api;
 
 class PluginCircuitPlugin {
 public:
@@ -44,7 +45,8 @@ public:
 	const clap_plugin *clapPlugin() const { return &plugin_; }
 
 	// ---- called by the editor / UI bridge (main thread) ----
-	choc::value::Value uiSnapshot(bool full);
+	// Adds the plugin's stores, commands and streams to the page's API (src/plugin/PluginApi.cpp).
+	void registerApi(Api &api);
 	void uiLoad(const std::string &pluginId, const std::string &sha256);
 	void uiUnload();
 	// A value from our UI for a macro (normalized) or an inner parameter, with its gesture phase (docs/MESSAGING.md).
@@ -74,7 +76,7 @@ public:
 	double sampleRate() const { return sampleRate_; }
 	InnerPlugin *innerForGui(); // main thread: the current inner plugin, or nullptr
 	std::string currentPackageSha() const { return current_ ? current_->meta.sha256 : std::string(); } // main thread
-	void packagesChanged() { installedAt_ = {}; stateVersion_++; } // main thread: after the settings page deleted some
+	void packagesChanged() { installedAt_ = {}; ++cacheVersion_; stateVersion_++; } // main thread: packages deleted
 	bool requestHostResize(uint32_t w, uint32_t h); // false: the host refused, keep the current size
 	void housekeeping(); // main thread: finish loads, free retired objects
 
@@ -218,6 +220,10 @@ private:
 	std::vector<clap_id> visibleParams_;  // sorted
 	std::vector<clap_id> pendingTexts_;   // visible parameters still owed a text (formatting is time-budgeted)
 	bool wantsText(clap_id id) const;
+	choc::value::Value paramValues(ParamTable &table, bool full); // main thread: the params store's values
+	choc::value::Value paramsFull();                              // main thread: the params store, whole
+	uint64_t paramsGeneration_ = 0;                               // the table the page has the shape of
+	uint64_t cacheVersion_ = 1;                                   // packages deleted, compile cache cleared
 	void queueText(clap_id id);
 	std::array<std::atomic<double>, kNumMacros> macroValues_{};
 	std::atomic<uint64_t> processEpoch_{0};

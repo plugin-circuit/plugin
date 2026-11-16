@@ -2,6 +2,7 @@
 #include "gui/EditorLayout.h"
 #include "core/PackageCache.h"
 #include "core/Settings.h"
+#include "api/Api.h"
 
 #include <wclap-bridge.h>
 
@@ -69,8 +70,8 @@ struct Editor::Impl {
 	uint32_t innerW = 0, innerH = 0;
 	uint32_t keyboardHeight = 0; // on-screen keyboard strip at the bottom (instruments), drawn by the web UI
 	static constexpr uint32_t kKeyboardHeight = 112;
-	uint64_t lastVersion = 0;
-	bool pageReady = false;
+	Api api;                // the page's one API (docs/MESSAGING.md): this editor is transport plus window logic
+	bool pageReady = false; // the page said hello
 	id keyMonitor = nil; // copies note keys typed into the inner plugin's GUI to the on-screen keyboard
 
 	explicit Impl(PluginCircuitPlugin &p) : plugin(p) {}
@@ -273,21 +274,85 @@ struct Editor::Impl {
 	}
 
 	// --- web UI --------------------------------------------------------------------------------------------
-	void push(bool full) {
+	// The editor's own part of the API: the `ui` store (view, keyboard, the inner GUI), loading (which also switches
+	// the view), and `app.*`. The plugin adds the rest (PluginCircuitPlugin::registerApi).
+	void registerApi() {
+		plugin.registerApi(api);
+		api.store("ui", {[this] { return choc::value::createObject("Ui", "view", view, "keyboard", keyboardHeight > 0, "innerGui", innerGuiCreated); },
+		                 [this] { return std::hash<std::string>{}(view) * 4 + (keyboardHeight > 0 ? 2 : 0) + (innerGuiCreated ? 1 : 0) + 1; },
+		                 [this](const choc::value::ValueView &v) -> std::string {
+			                 if (!v.isObject()) return "expected an object";
+			                 for (uint32_t i = 0; i < v.size(); ++i) {
+				                 const std::string k = v.getObjectMemberAt(i).name;
+				                 if (k != "view" && k != "keyboard") return "unknown key '" + k + "'";
+			                 }
+			                 if (v.hasObjectMember("view")) {
+				                 const std::string next = v["view"].isString() ? std::string(v["view"].getString()) : "";
+				                 if (next != "plugin" && next != "browse" && next != "macros" && next != "params" && next != "settings")
+					                 return "unknown view '" + next + "'";
+				                 setView(next);
+			                 }
+			                 if (v.hasObjectMember("keyboard")) {
+				                 if (!v["keyboard"].isBool()) return "keyboard must be true or false";
+				                 setKeyboard(v["keyboard"].getBool());
+			                 }
+			                 return {};
+		                 }});
+		api.command("plugin.load", [this](const choc::value::ValueView &a, std::string &error) -> choc::value::Value {
+			const std::string id = a.isObject() && a.hasObjectMember("pluginId") && a["pluginId"].isString() ? std::string(a["pluginId"].getString()) : "";
+			if (id.empty()) {
+				error = "plugin.load needs a pluginId";
+				return {};
+			}
+			const std::string sha = a.hasObjectMember("sha256") && a["sha256"].isString() ? std::string(a["sha256"].getString()) : "";
+			plugin.uiLoad(id, sha);
+			setView("plugin");
+			return choc::value::Value(true);
+		});
+		api.command("plugin.unload", [this](const choc::value::ValueView &, std::string &) {
+			plugin.uiUnload();
+			setView("browse");
+			return choc::value::Value(true);
+		});
+		api.command("app.log", [](const choc::value::ValueView &a, std::string &) {
+			if (a.isObject() && a.hasObjectMember("text") && a["text"].isString())
+				std::fprintf(stderr, "[plugincircuit ui] %s\n", std::string(a["text"].getString()).c_str());
+			return choc::value::Value(true);
+		});
+		api.command("app.openUrl", [](const choc::value::ValueView &a, std::string &error) -> choc::value::Value {
+			const std::string url = a.isObject() && a.hasObjectMember("url") && a["url"].isString() ? std::string(a["url"].getString()) : "";
+			if (url.rfind("http", 0) != 0) {
+				error = "only http(s) links";
+				return {};
+			}
+			[[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]]];
+			return choc::value::Value(true);
+		});
+		api.send = [this](const choc::value::Value &m) {
+			if (web) web->evaluateJavascript("window.plugincircuitReceive && window.plugincircuitReceive(" + choc::json::toString(m) + ")");
+		};
+	}
+
+	// the page's one call: request(name, args) -> {ok, result | error}
+	choc::value::Value request(const choc::value::ValueView &args) {
+		const std::string name = args.size() > 0 && args[0].isString() ? std::string(args[0].getString()) : "";
+		const auto a = args.size() > 1 ? args[1] : choc::value::ValueView();
+		auto reply = api.request(name, a);
+		if (name == "hello") pageReady = reply["ok"].getBool();
+		return reply;
+	}
+
+	void sendPatches() {
 		if (!web || !pageReady) return;
-		const auto snapT0 = std::chrono::steady_clock::now();
-		auto snap = plugin.uiSnapshot(full);
+		const auto t0 = std::chrono::steady_clock::now();
+		api.tick(std::chrono::duration<double>(t0.time_since_epoch()).count());
 		if (static const bool dbg = std::getenv("PLUGINCIRCUIT_DEBUG_CALLS") != nullptr; dbg) {
 			static double worst = 0, sum = 0;
 			static int n = 0;
-			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - snapT0).count();
+			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 			worst = std::max(worst, ms), sum += ms, ++n;
-			if (n % 10 == 0) std::fprintf(stderr, "[plugincircuit snapshot] last %.1f ms, avg %.1f ms, worst %.1f ms (%s)\n", ms, sum / n, worst, full ? "full" : "values");
+			if (n % 10 == 0) std::fprintf(stderr, "[plugincircuit snapshot] last %.1f ms, avg %.1f ms, worst %.1f ms (patches)\n", ms, sum / n, worst);
 		}
-		snap.addMember("view", view);
-		snap.addMember("innerGui", innerGuiCreated);
-		snap.addMember("keyboard", keyboardHeight > 0);
-		web->evaluateJavascript("try { window.plugincircuitHost && window.plugincircuitHost.update(" + choc::json::toString(snap) + ") } catch (e) { plugincircuitCall('log', {text: 'update failed: ' + e + ' ' + e.stack}) }");
 	}
 
 	// Debug: PLUGINCIRCUIT_SNAPSHOT=<file.png> writes the webview (WebKit's own renderer, no screen-recording
@@ -298,7 +363,7 @@ struct Editor::Impl {
 		++ticks;
 		if (ticks == 10) {
 			if (const char *id = std::getenv("PLUGINCIRCUIT_AUTOLOAD")) plugin.uiLoad(id, "");
-			if (const char *v = std::getenv("PLUGINCIRCUIT_VIEW")) { setView(v); push(true); }
+			if (const char *v = std::getenv("PLUGINCIRCUIT_VIEW")) setView(v);
 		}
 		// PLUGINCIRCUIT_UI_JS=<js>: run once in the host UI after the autoload settled (debug only)
 		if (ticks == 160 && web)
@@ -403,112 +468,7 @@ struct Editor::Impl {
 		if (uint64_t s = plugin.pendingInnerResize.exchange(0, std::memory_order_acquire)) applyInnerSize(uint32_t(s >> 32), uint32_t(s));
 		debugHooks();
 		plugin.housekeeping(); // also covers hosts without timer-support
-		auto version = plugin.stateVersion_.load();
-		bool full = version != lastVersion;
-		lastVersion = version;
-		push(full);
-	}
-
-	choc::value::Value call(const choc::value::ValueView &args) {
-		std::string method = args.size() > 0 && args[0].isString() ? std::string(args[0].getString()) : "";
-		auto a = args.size() > 1 ? args[1] : choc::value::ValueView();
-		auto num = [&](const char *k, double d = 0) {
-			return a.isObject() && a.hasObjectMember(k) && (a[k].isFloat() || a[k].isInt()) ? a[k].getWithDefault<double>(d) : d;
-		};
-		auto str = [&](const char *k) {
-			return a.isObject() && a.hasObjectMember(k) && a[k].isString() ? std::string(a[k].getString()) : std::string();
-		};
-		if (method == "ready") {
-			pageReady = true;
-			lastVersion = 0;
-			push(true);
-		} else if (method == "load") {
-			plugin.uiLoad(str("pluginId"), str("sha256"));
-			setView("plugin");
-		} else if (method == "unload") {
-			plugin.uiUnload();
-			setView("browse");
-		} else if (method == "view") {
-			setView(str("view"));
-			push(true);
-		} else if (method == "edit") { // {target: "macro" | "param", id, value, phase: "set" | "begin" | "update" | "end"}
-			const auto phaseName = str("phase");
-			const Phase phase = phaseName == "begin" ? Phase::Begin : phaseName == "update" ? Phase::Update
-			                    : phaseName == "end" ? Phase::End : Phase::Set;
-			plugin.uiEdit(str("target") == "macro", (uint32_t)num("id"), num("value"), phase);
-		} else if (method == "note") {
-			plugin.uiNote((int16_t)num("key", -1), num("velocity", 0.8), num("on") != 0);
-		} else if (method == "transport") {
-			plugin.uiSetTransport(num("playing") != 0);
-		} else if (method == "keyboard") {
-			setKeyboard(num("open") != 0);
-		} else if (method == "cacheList") { // settings: the package and compile caches
-			const auto current = plugin.currentPackageSha();
-			auto list = choc::value::createEmptyArray();
-			uint64_t total = 0;
-			for (auto &p : PackageCache::list()) {
-				total += p.bytes;
-				list.addArrayElement(choc::value::createObject("Package", "sha256", p.sha256, "name", p.name, "vendor", p.vendor,
-				                                               "bytes", (int64_t)p.bytes, "lastUsed", p.lastUsed, "lastSaved", p.lastSaved,
-				                                               "inUse", p.inUse, "current", p.sha256 == current));
-			}
-			return choc::value::createObject("Caches", "packages", list, "packagesBytes", (int64_t)total,
-			                                 "compiledBytes", (int64_t)PackageCache::compiledBytes());
-		} else if (method == "cacheDelete") { // {shas: [...]}: skips packages in use
-			int deleted = 0;
-			auto skipped = choc::value::createEmptyArray();
-			if (a.isObject() && a.hasObjectMember("shas") && a["shas"].isArray())
-				for (auto s : a["shas"]) {
-					if (!s.isString()) continue;
-					std::string why;
-					if (PackageCache::remove(std::string(s.getString()), why)) ++deleted;
-					else skipped.addArrayElement(choc::value::createObject("Skipped", "sha256", std::string(s.getString()), "why", why));
-				}
-			plugin.packagesChanged();
-			return choc::value::createObject("Deleted", "deleted", deleted, "skipped", skipped);
-		} else if (method == "perfGet") { // settings > Performance: totals, the reader takes deltas
-			auto &perf = plugin.performance;
-			return choc::value::createObject("Performance", "blocks", (int64_t)perf.blocks.load(), "overBudget",
-			                                 (int64_t)perf.overBudget.load(), "loadPpmSum", (int64_t)perf.loadPpmSum.load(),
-			                                 "peakPpm", (int64_t)perf.peakPpm.exchange(0), "skipped",
-			                                 (int64_t)wclap_audio_skipped_blocks(), "blockFrames",
-			                                 (int64_t)perf.blockFrames.load(), "sampleRate", plugin.sampleRate());
-		} else if (method == "visibleParams") { // the Params view's rows in view: texts only for these
-			std::vector<clap_id> ids;
-			if (a.isObject() && a.hasObjectMember("ids") && a["ids"].isArray())
-				for (auto v : a["ids"])
-					if (v.isInt() || v.isFloat()) ids.push_back((clap_id)v.getWithDefault<int64_t>(0));
-			plugin.setVisibleParams(std::move(ids));
-		} else if (method == "settingsGet") {
-			const auto s = Settings::load();
-			return choc::value::createObject("Settings", "audioWaitRatio", double(s.audioWaitRatio), "concealDropouts",
-			                                 s.concealDropouts, "skippedBlocks", (int64_t)wclap_audio_skipped_blocks());
-		} else if (method == "settingsSet") {
-			auto s = Settings::load();
-			if (a.isObject() && a.hasObjectMember("audioWaitRatio")) s.audioWaitRatio = float(num("audioWaitRatio", s.audioWaitRatio));
-			if (a.isObject() && a.hasObjectMember("concealDropouts") && a["concealDropouts"].isBool()) s.concealDropouts = a["concealDropouts"].getBool();
-			s.save();
-			s.apply();
-		} else if (method == "cacheClearCompiled") {
-			PackageCache::clearCompiled();
-		} else if (method == "paramText") { // the plugin's own text for a value (value_to_text), e.g. while dragging
-			return choc::value::Value(plugin.paramTextCached((clap_id)num("id"), num("value")));
-		} else if (method == "mapMacro") {
-			plugin.uiMapMacro((uint32_t)num("slot"), (clap_id)num("paramId"), num("min"), num("max", 1), num("add") != 0);
-		} else if (method == "unmapMacro") {
-			plugin.uiUnmapMacro((uint32_t)num("slot"), (int64_t)num("paramId", -1));
-		} else if (method == "renameMacro") {
-			plugin.uiRenameMacro((uint32_t)num("slot"), str("name"));
-		} else if (method == "autoMap") {
-			plugin.uiAutoMap();
-		} else if (method == "log") {
-			std::fprintf(stderr, "[plugincircuit ui] %s\n", str("text").c_str());
-		} else if (method == "openUrl") {
-			auto url = str("url");
-			if (url.rfind("http", 0) == 0)
-				[[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:[NSString stringWithUTF8String:url.c_str()]]];
-		}
-		return choc::value::Value(true);
+		sendPatches();
 	}
 
 	bool create() {
@@ -541,7 +501,8 @@ struct Editor::Impl {
 		};
 		web = std::make_unique<choc::ui::WebView>(options);
 		if (!web->loadedOK()) return false;
-		web->bind("plugincircuitCall", [this](const choc::value::ValueView &args) -> choc::value::Value { return call(args); });
+		registerApi();
+		web->bind("plugincircuitRequest", [this](const choc::value::ValueView &args) -> choc::value::Value { return request(args); });
 		NSView *wv = (__bridge NSView *)web->getViewHandle();
 		[container addSubview:wv];
 
@@ -655,8 +616,7 @@ void Editor::innerWillChange() { impl->destroyInnerGui(); }
 void Editor::innerDidChange() {
 	if (impl->plugin.innerForGui()) impl->view = "plugin"; // a finished load always lands on its GUI
 	if (impl->view == "plugin") impl->createInnerGui();
-	impl->layout();
-	impl->lastVersion = 0;
+	impl->layout(); // the ui store's innerGui changes with it: patched on the next tick
 }
 bool Editor::innerRequestResize(uint32_t w, uint32_t h) { // main thread (other threads: the plugin's pendingInnerResize)
 	impl->applyInnerSize(w, h);

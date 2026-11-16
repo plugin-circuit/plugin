@@ -59,6 +59,10 @@ const clap_host_gui hostGui{
 const clap_host_thread_check threadCheck{[](const clap_host *) { return bool([NSThread isMainThread]); },
                                          [](const clap_host *) { return false; }};
 
+// what the plugin told the DAW about its parameters, printed at the end: "B0" gesture begin on parameter 0, "D0=0.5"
+// a value, "E0" gesture end (a functional check, e.g. a UI drag, can match it)
+std::string dawEvents;
+
 // params: a DAW that isn't processing flushes when the plugin asks (how UI edits get applied without audio)
 const clap_host_params hostParams{
 	[](const clap_host *, clap_param_rescan_flags) {},
@@ -69,7 +73,19 @@ const clap_host_params hostParams{
 			auto *params = (const clap_plugin_params *)plugin->get_extension(plugin, CLAP_EXT_PARAMS);
 			static const clap_input_events none{nullptr, [](const clap_input_events *) -> uint32_t { return 0; },
 			                                    [](const clap_input_events *, uint32_t) -> const clap_event_header * { return nullptr; }};
-			static const clap_output_events sink{nullptr, [](const clap_output_events *, const clap_event_header *) { return true; }};
+			static const clap_output_events sink{nullptr, [](const clap_output_events *, const clap_event_header *h) {
+				                                     if (h->space_id != CLAP_CORE_EVENT_SPACE_ID) return true;
+				                                     char e[64] = {};
+				                                     if (h->type == CLAP_EVENT_PARAM_VALUE) {
+					                                     auto *v = reinterpret_cast<const clap_event_param_value *>(h);
+					                                     std::snprintf(e, sizeof(e), "D%u=%g", v->param_id, v->value);
+				                                     } else if (h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN || h->type == CLAP_EVENT_PARAM_GESTURE_END) {
+					                                     std::snprintf(e, sizeof(e), "%c%u", h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN ? 'B' : 'E',
+					                                                   reinterpret_cast<const clap_event_param_gesture *>(h)->param_id);
+				                                     }
+				                                     if (*e) dawEvents += (dawEvents.empty() ? "" : " ") + std::string(e);
+				                                     return true;
+			                                     }};
 			if (params && params->flush) params->flush(plugin, &none, &sink);
 		});
 	},
@@ -254,6 +270,7 @@ int main(int argc, char **argv) {
 		gui->destroy(plugin);
 		plugin->destroy(plugin);
 		entry->deinit();
+		std::printf("daw events: [%s]\n", dawEvents.c_str());
 		std::printf(ok ? "PASS\n" : "FAIL\n");
 		std::fflush(stdout);
 		_exit(ok ? 0 : 1); // skip static destructors of the dlopen'ed bundle

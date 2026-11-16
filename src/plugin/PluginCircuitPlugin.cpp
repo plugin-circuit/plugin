@@ -82,7 +82,10 @@ struct PluginGlue {
 			if (!s->editor_->create()) { s->editor_.reset(); return false; }
 			return true;
 		},
-		.destroy = [](const clap_plugin *p) { self(p)->editor_.reset(); },
+		.destroy = [](const clap_plugin *p) {
+			self(p)->editor_.reset();
+			self(p)->gestures_.requestCloseUi(); // a drag can't end without its page
+		},
 		.set_scale = [](const clap_plugin *p, double scale) { return self(p)->editor_ ? self(p)->editor_->setScale(scale) : false; },
 		.get_size = [](const clap_plugin *p, uint32_t *w, uint32_t *h) { return self(p)->editor_ ? self(p)->editor_->getSize(*w, *h) : false; },
 		.can_resize = [](const clap_plugin *) { return true; },
@@ -183,6 +186,7 @@ bool PluginCircuitPlugin::activate(double sampleRate, uint32_t minFrames, uint32
 }
 
 void PluginCircuitPlugin::deactivate() {
+	gestures_.requestCloseAll(); // closed (GESTURE_END to the DAW) at the first process or flush after this
 	lockInner();
 	if (audioStarted_ && audioStarted_->started) { // host stopped processing without stop_processing reaching us
 		audioStarted_->inner->stopProcessing();
@@ -211,7 +215,7 @@ void PluginCircuitPlugin::stopProcessing() {
 	processing_ = false;
 }
 
-void PluginCircuitPlugin::reset() {}
+void PluginCircuitPlugin::reset() { gestures_.requestCloseAll(); }
 
 void PluginCircuitPlugin::lockInner() {
 	while (innerLock_.test_and_set(std::memory_order_acquire)) std::this_thread::yield();
@@ -230,49 +234,52 @@ void PluginCircuitPlugin::passThrough(const clap_process *p) {
 	}
 }
 
+// Where the gesture state machine's decisions go: values into the WCLAP's input list (and the table), macro values to
+// macroValues_ and the DAW, gestures to the DAW. `time` stamps what goes out (the event being handled).
+struct PluginCircuitPlugin::EventSink final : Gestures::Sink {
+	PluginCircuitPlugin &self;
+	ParamTable *table;
+	uint32_t time = 0;
+	EventSink(PluginCircuitPlugin &s, ParamTable *t) : self(s), table(t) {}
+	void toPlugin(clap_id param, double value) override {
+		clap_event_param_value e{{sizeof(e), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, param, nullptr, -1, -1, -1, -1, value};
+		self.innerIn_.push(&e.header);
+		if (table) table->setById(param, value); // every value applied to the plugin is also the table's
+	}
+	void macroValue(uint32_t macro, double normalized, bool tellDaw) override {
+		self.macroValues_[macro].store(normalized);
+		if (!tellDaw || !self.outerOut_) return; // the DAW's own values aren't echoed
+		clap_event_param_value e{{sizeof(e), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, macro, nullptr, -1, -1, -1, -1, normalized};
+		self.outerOut_->try_push(self.outerOut_, &e.header);
+	}
+	void dawGesture(uint32_t macro, bool begin) override {
+		if (!self.outerOut_) return;
+		clap_event_param_gesture g{{sizeof(g), time, CLAP_CORE_EVENT_SPACE_ID,
+		                            uint16_t(begin ? CLAP_EVENT_PARAM_GESTURE_BEGIN : CLAP_EVENT_PARAM_GESTURE_END), 0}, macro};
+		self.outerOut_->try_push(self.outerOut_, &g.header);
+	}
+};
+
 void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slot, const MacroMap *map, bool drainUi,
                                           bool drainNotes) {
 	innerIn_.clear();
-	// every value applied to the plugin is also the table's (the single source of truth); no table: nothing loaded
+	if (!slot && !drainUi) { // the main thread is swapping the plugin: only keep the DAW's macro values, unless owned
+		for (uint32_t i = 0, n = in ? in->size(in) : 0; i < n; ++i) {
+			auto *h = in->get(in, i);
+			if (h->space_id != CLAP_CORE_EVENT_SPACE_ID || h->type != CLAP_EVENT_PARAM_VALUE) continue;
+			auto *e = reinterpret_cast<const clap_event_param_value *>(h);
+			if (e->param_id < kNumMacros && gestures_.macroOwner(e->param_id) == Owner::None) macroValues_[e->param_id].store(e->value);
+		}
+		return;
+	}
 	ParamTable *table = slot ? slot->params.load(std::memory_order_acquire) : nullptr;
-	auto record = [table](clap_id id, double v) {
-		if (table) table->setById(id, v);
-	};
+	EventSink sink(*this, table);
+	gestures_.begin(table, sink); // closes gestures left open (a new table, unload, reset, the editor closing)
 	// UI-originated events first: they are stamped at time 0, so the list stays sorted
 	UiEvent ui;
 	while (drainUi && uiEvents_.pop(ui)) {
-		if (ui.kind == UiEvent::Macro && ui.id < kNumMacros) {
-			macroValues_[ui.id].store(ui.value);
-			if (map)
-				for (auto &t : map->macros[ui.id].targets) {
-					clap_event_param_value e{{sizeof(e), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, t.paramId, nullptr, -1, -1, -1, -1, t.map(ui.value)};
-					innerIn_.push(&e.header);
-					record(t.paramId, e.value);
-				}
-			if (outerOut_) { // tell the DAW so automation records UI moves
-				clap_event_param_value e{{sizeof(e), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, ui.id, nullptr, -1, -1, -1, -1, ui.value};
-				outerOut_->try_push(outerOut_, &e.header);
-			}
-		} else if ((ui.kind == UiEvent::GestureBegin || ui.kind == UiEvent::GestureEnd) && outerOut_) {
-			clap_event_param_gesture g{{sizeof(g), 0, CLAP_CORE_EVENT_SPACE_ID,
-			                            uint16_t(ui.kind == UiEvent::GestureBegin ? CLAP_EVENT_PARAM_GESTURE_BEGIN : CLAP_EVENT_PARAM_GESTURE_END), 0}, ui.id};
-			outerOut_->try_push(outerOut_, &g.header);
-		} else if (ui.kind == UiEvent::Param) {
-			clap_event_param_value e{{sizeof(e), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, ui.id, nullptr, -1, -1, -1, -1, ui.value};
-			innerIn_.push(&e.header);
-			record(ui.id, ui.value);
-			if (map) {
-				int s = map->slotForParam(ui.id);
-				if (s >= 0) {
-					double n = map->macros[s].targets[0].unmap(ui.value);
-					macroValues_[s].store(n);
-					if (outerOut_) {
-						clap_event_param_value o{{sizeof(o), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)s, nullptr, -1, -1, -1, -1, n};
-						outerOut_->try_push(outerOut_, &o.header);
-					}
-				}
-			}
-		}
+		if (ui.kind == UiEvent::Macro) gestures_.uiMacro(map, ui.id, ui.value, ui.phase, sink);
+		else if (ui.kind == UiEvent::Param) gestures_.uiParam(map, ui.id, ui.value, ui.phase, sink);
 	}
 	while (drainNotes && uiNotes_.pop(ui)) {
 		clap_event_note n{{sizeof(n), 0, CLAP_CORE_EVENT_SPACE_ID, uint16_t(ui.kind == UiEvent::NoteOn ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF), 0},
@@ -286,16 +293,10 @@ void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slo
 		if (h->space_id != CLAP_CORE_EVENT_SPACE_ID) continue;
 		if (h->type == CLAP_EVENT_PARAM_VALUE) {
 			auto *e = reinterpret_cast<const clap_event_param_value *>(h);
-			if (e->param_id >= kNumMacros) continue;
-			macroValues_[e->param_id].store(e->value);
-			if (!map || !slot) continue;
-			for (auto &t : map->macros[e->param_id].targets) {
-				clap_event_param_value ie{{sizeof(ie), h->time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, t.paramId, nullptr, -1, -1, -1, -1, t.map(e->value)};
-				innerIn_.push(&ie.header);
-				record(t.paramId, ie.value);
-			}
+			sink.time = h->time;
+			gestures_.dawMacro(slot ? map : nullptr, e->param_id, e->value, sink);
 		} else if (h->type == CLAP_EVENT_PARAM_MOD || h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN || h->type == CLAP_EVENT_PARAM_GESTURE_END) {
-			continue; // macros aren't modulatable yet; gestures are host-side only
+			continue; // macros aren't modulatable yet; gestures go from a plugin to its host, never back
 		} else {
 			innerIn_.push(h); // notes, note expressions, MIDI, transport
 		}
@@ -306,34 +307,18 @@ bool PluginCircuitPlugin::innerOutTryPush(const clap_output_events *list, const 
 	auto *self = static_cast<PluginCircuitPlugin *>(list->ctx);
 	auto *out = self->outerOut_;
 	if (h->space_id != CLAP_CORE_EVENT_SPACE_ID) return true;
-	auto *map = self->macros_.load(std::memory_order_acquire);
-	if (h->type == CLAP_EVENT_PARAM_VALUE) {
-		auto *e = reinterpret_cast<const clap_event_param_value *>(h);
-		// the plugin changed it (its own GUI, its DSP): the table follows. current_ is stable here: called from
-		// inside its process (innerLock_ held) or from params.flush on the main thread.
-		if (auto *slot = self->current_)
-			if (auto *table = slot->params.load(std::memory_order_acquire)) table->setById(e->param_id, e->value);
-		int s = map ? map->slotForParam(e->param_id) : -1;
-		if (s >= 0) {
-			double n = map->macros[s].targets[0].unmap(e->value);
-			self->macroValues_[s].store(n);
-			if (out) {
-				clap_event_param_value o = *e;
-				o.param_id = (clap_id)s;
-				o.cookie = nullptr;
-				o.value = n;
-				out->try_push(out, &o.header);
-			}
-		}
-		return true;
-	}
-	if (h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN || h->type == CLAP_EVENT_PARAM_GESTURE_END) {
-		auto *g = reinterpret_cast<const clap_event_param_gesture *>(h);
-		int s = map ? map->slotForParam(g->param_id) : -1;
-		if (s >= 0 && out) {
-			clap_event_param_gesture o = *g;
-			o.param_id = (clap_id)s;
-			out->try_push(out, &o.header);
+	// the plugin changed or gestures its own parameter (its GUI, its DSP): through the state machine. current_ is
+	// stable here: called from inside its process (innerLock_ held) or from params.flush on the main thread.
+	if (h->type == CLAP_EVENT_PARAM_VALUE || h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN || h->type == CLAP_EVENT_PARAM_GESTURE_END) {
+		auto *map = self->macros_.load(std::memory_order_acquire);
+		EventSink sink(*self, self->current_ ? self->current_->params.load(std::memory_order_acquire) : nullptr);
+		sink.time = h->time;
+		if (h->type == CLAP_EVENT_PARAM_VALUE) {
+			auto *e = reinterpret_cast<const clap_event_param_value *>(h);
+			self->gestures_.pluginValue(map, e->param_id, e->value, sink);
+		} else {
+			auto *g = reinterpret_cast<const clap_event_param_gesture *>(h);
+			self->gestures_.pluginGesture(map, g->param_id, h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN, sink);
 		}
 		return true;
 	}
@@ -934,22 +919,14 @@ void PluginCircuitPlugin::uiUnload() {
 	housekeeping();
 }
 
-void PluginCircuitPlugin::uiSetMacro(uint32_t slot, double normalized, int gesture) {
+void PluginCircuitPlugin::uiEdit(bool macro, uint32_t id, double value, Phase phase) {
 	wakeIfSleeping(); // a WCLAP that returned SLEEP isn't processed until the DAW is asked
-	if (slot >= kNumMacros) return;
-	normalized = normalized < 0 ? 0 : (normalized > 1 ? 1 : normalized);
+	if (macro) {
+		if (id >= kNumMacros) return;
+		value = value < 0 ? 0 : (value > 1 ? 1 : value);
+	}
 	std::lock_guard<std::mutex> lock(uiPushMutex_);
-	if (gesture == 1) uiEvents_.push({UiEvent::GestureBegin, slot, 0});
-	uiEvents_.push({UiEvent::Macro, slot, normalized});
-	if (gesture == 2) uiEvents_.push({UiEvent::GestureEnd, slot, 0});
-	macroValues_[slot].store(normalized);
-	if (!processing_ && hostParams_) hostParams_->request_flush(host_);
-}
-
-void PluginCircuitPlugin::uiSetParam(clap_id id, double value) {
-	wakeIfSleeping(); // a WCLAP that returned SLEEP isn't processed until the DAW is asked
-	std::lock_guard<std::mutex> lock(uiPushMutex_);
-	uiEvents_.push({UiEvent::Param, id, value});
+	uiEvents_.push({macro ? UiEvent::Macro : UiEvent::Param, phase, id, value});
 	if (!processing_ && hostParams_) hostParams_->request_flush(host_);
 }
 
@@ -959,14 +936,14 @@ void PluginCircuitPlugin::uiNote(int16_t key, double velocity, bool on) {
 	std::lock_guard<std::mutex> lock(uiPushMutex_);
 	// A failed push (queue full) keeps the held bit as it was: a lost note-on is not held, a lost note-off still is,
 	// so uiAllNotesOff() retries it.
-	if (uiNotes_.push({on ? UiEvent::NoteOn : UiEvent::NoteOff, uint32_t(key), std::clamp(velocity, 0.0, 1.0)}))
+	if (uiNotes_.push({on ? UiEvent::NoteOn : UiEvent::NoteOff, Phase::Set, uint32_t(key), std::clamp(velocity, 0.0, 1.0)}))
 		uiHeldNotes_.set(size_t(key), on);
 }
 
 void PluginCircuitPlugin::uiAllNotesOff() {
 	std::lock_guard<std::mutex> lock(uiPushMutex_);
 	for (size_t k = 0; k < uiHeldNotes_.size(); ++k)
-		if (uiHeldNotes_.test(k) && uiNotes_.push({UiEvent::NoteOff, uint32_t(k), 0.0})) uiHeldNotes_.reset(k);
+		if (uiHeldNotes_.test(k) && uiNotes_.push({UiEvent::NoteOff, Phase::Set, uint32_t(k), 0.0})) uiHeldNotes_.reset(k);
 }
 
 void PluginCircuitPlugin::uiMapMacro(uint32_t slot, clap_id paramId, double minValue, double maxValue, bool add) {
@@ -1071,6 +1048,8 @@ choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 		constexpr auto kTextBudget = std::chrono::milliseconds(8);
 		const auto deadline = std::chrono::steady_clock::now() + kTextBudget;
 		auto add = [&](size_t i) {
+			// a parameter our UI is dragging: the page's value is the truth; the final value comes at the end
+			if (table->owner(i) == Owner::Ui) return;
 			const auto id = table->info(i).id;
 			const double v = table->value(i);
 			if (wantsText(id)) {

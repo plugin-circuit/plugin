@@ -172,6 +172,10 @@ endif()
 add_executable(plugincircuit-param-table-test tests/param_table_test.cpp)
 target_include_directories(plugincircuit-param-table-test PRIVATE src ${wclap-bridge_SOURCE_DIR}/modules/clap/include)
 add_test(NAME param-table COMMAND plugincircuit-param-table-test)
+# the gesture / ownership state machine: one case per cell of docs/MESSAGING.md's table
+add_executable(plugincircuit-gestures-test tests/gestures_test.cpp src/plugin/Macros.cpp)
+target_include_directories(plugincircuit-gestures-test PRIVATE src ${wclap-bridge_SOURCE_DIR}/modules/clap/include)
+add_test(NAME gestures COMMAND plugincircuit-gestures-test)
 # host UI: only the catalog's picker iframe may load plugins (headless Chromium, via the website's Playwright)
 find_program(BUN_EXECUTABLE bun)
 if (BUN_EXECUTABLE AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../website/node_modules/@playwright/test)
@@ -208,6 +212,11 @@ if (PLUGINCIRCUIT_BUILD_PLUGIN AND APPLE)
 			COMMAND plugincircuit-editor-resize-test ${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap ${mode} "${PLUGINCIRCUIT_TEST_INNER_PLUGIN}")
 		set_tests_properties(editor-resize-${mode} PROPERTIES LABELS gui RUN_SERIAL TRUE TIMEOUT 60)
 	endforeach()
+	# a drag in the Macros view reaches the DAW as gesture begin, values, gesture end, in order (PLAN.md phase 2)
+	add_test(NAME ui-gesture COMMAND plugincircuit-editor-resize-test ${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap refuse "" 9) # the script runs ~5 s in
+	set_tests_properties(ui-gesture PROPERTIES LABELS gui RUN_SERIAL TRUE TIMEOUT 30
+		ENVIRONMENT "PLUGINCIRCUIT_UI_JS=setTimeout(() => (edit('macro', 0, 0.2, 'begin'), edit('macro', 0, 0.5, 'update'), edit('macro', 0, 0.6, 'end')), 500)"
+		PASS_REGULAR_EXPRESSION "daw events: \\[B0 D0=0.2 D0=0.5 D0=0.6 E0\\]")
 endif()
 
 # --- libplugincircuit: the C SDK for third-party hosts (MVP step 3) -----------------------------

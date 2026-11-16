@@ -117,6 +117,17 @@ build script; a new `test-param-events`:
 
 ## Phase 2: gestures and ownership — M
 
+Status: done. `src/plugin/Gestures.h` is the state machine (a pure class: effects leave through a sink); owners are
+kept per inner parameter (in the table, readable by the main thread) and per macro (the DAW's gestures are on
+macros). The UI sends `edit {target, id, value, phase}`; `setMacro` / `setParam` are gone. Open gestures close on a
+new table (load, unload, rescan), `reset()`, deactivate (all) and the editor closing (the UI's). The snapshot leaves
+out UI-owned values; the gesture's end pushes the final value. A skipped block's carry-over overflow can't leave a
+gesture open (the carry-over holds only the WCLAP's input; ownership is decided before the bridge): what it can lose
+is a value, which is the safety net's case. Tests: `gestures` (36 cases, every cell of the table plus multi-target
+macros, unmapped parameters, closing), `ui-gesture` (a Macros drag in the real page reaches the DAW as
+`B0 D0=0.2 D0=0.5 D0=0.6 E0`), `plugin-param-events` (also: an unmapped parameter's gesture reaches only the table).
+2.4's `ack` waits for phase 3.
+
 **2.1 `edit {target, id, value, phase}`** for macros and parameters (`begin` / `update` / `end` / `set`), replacing
 `setMacro` / `setParam`. The UI queue carries the phase.
 

@@ -431,16 +431,17 @@ struct Editor::Impl {
 		} else if (method == "view") {
 			setView(str("view"));
 			push(true);
-		} else if (method == "setMacro") {
-			plugin.uiSetMacro((uint32_t)num("slot"), num("value"), (int)num("gesture"));
+		} else if (method == "edit") { // {target: "macro" | "param", id, value, phase: "set" | "begin" | "update" | "end"}
+			const auto phaseName = str("phase");
+			const Phase phase = phaseName == "begin" ? Phase::Begin : phaseName == "update" ? Phase::Update
+			                    : phaseName == "end" ? Phase::End : Phase::Set;
+			plugin.uiEdit(str("target") == "macro", (uint32_t)num("id"), num("value"), phase);
 		} else if (method == "note") {
 			plugin.uiNote((int16_t)num("key", -1), num("velocity", 0.8), num("on") != 0);
 		} else if (method == "transport") {
 			plugin.uiSetTransport(num("playing") != 0);
 		} else if (method == "keyboard") {
 			setKeyboard(num("open") != 0);
-		} else if (method == "setParam") {
-			plugin.uiSetParam((clap_id)num("id"), num("value"));
 		} else if (method == "cacheList") { // settings: the package and compile caches
 			const auto current = plugin.currentPackageSha();
 			auto list = choc::value::createEmptyArray();

@@ -154,6 +154,7 @@ int main(int argc, char **argv) {
 	session.macros.macros[0].name = "Level"; // published when the load finishes: the test's "loaded" signal
 	session.macros.macros[0].customName = true;
 
+	constexpr uint32_t frames = 256;
 	std::string bin = std::string(argv[1]) + "/Contents/MacOS/PluginCircuit";
 	void *lib = dlopen(bin.c_str(), RTLD_NOW);
 	if (!lib) {
@@ -163,32 +164,44 @@ int main(int argc, char **argv) {
 	auto *entry = (const clap_plugin_entry *)dlsym(lib, "clap_entry");
 	entry->init(argv[1]);
 	auto *factory = (const clap_plugin_factory *)entry->get_factory(CLAP_PLUGIN_FACTORY_ID);
-	const clap_plugin *p = factory->create_plugin(factory, &host, "studio.plugincircuit.host.synth");
-	if (!p || !p->init(p)) return 1;
+	// an instance of Plugin Circuit with the session loaded, processing
+	auto open = [&](const HostState &session) -> const clap_plugin * {
+		const clap_plugin *p = factory->create_plugin(factory, &host, "studio.plugincircuit.host.synth");
+		if (!p || !p->init(p)) return nullptr;
+		auto *state = (const clap_plugin_state *)p->get_extension(p, CLAP_EXT_STATE);
+		auto *params = (const clap_plugin_params *)p->get_extension(p, CLAP_EXT_PARAMS);
+		loadState(p, state, encodeState(session));
+		// the load runs on a thread and finishes on the main thread: run on_main_thread until the session's macros apply
+		bool loaded = false;
+		for (int i = 0; i < 1000 && !loaded; ++i) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			if (callbackRequested.exchange(false)) p->on_main_thread(p);
+			clap_param_info info{};
+			loaded = params->get_info(p, 0, &info) && std::string(info.name) == session.macros.macros[0].name;
+		}
+		CHECK(loaded, "the test plugin didn't load (macro 1 isn't named as the session says)");
+		if (!loaded) return nullptr;
+		p->activate(p, 48000, 1, frames);
+		tlsAudio = true;
+		p->start_processing(p);
+		tlsAudio = false;
+		return p;
+	};
+	auto close = [&](const clap_plugin *p) {
+		tlsAudio = true;
+		p->stop_processing(p);
+		tlsAudio = false;
+		p->deactivate(p);
+		p->destroy(p);
+	};
+
+	const clap_plugin *p = open(session);
+	if (!p) return 1;
 	auto *state = (const clap_plugin_state *)p->get_extension(p, CLAP_EXT_STATE);
-	auto *params = (const clap_plugin_params *)p->get_extension(p, CLAP_EXT_PARAMS);
-
-	loadState(p, state, encodeState(session));
-	// the load runs on a thread and finishes on the main thread: run on_main_thread until the session's macros apply
-	bool loaded = false;
-	for (int i = 0; i < 1000 && !loaded; ++i) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		if (callbackRequested.exchange(false)) p->on_main_thread(p);
-		clap_param_info info{};
-		loaded = params->get_info(p, 0, &info) && std::string(info.name) == "Level";
-	}
-	CHECK(loaded, "the test plugin didn't load (macro 1 isn't named after its Level parameter)");
-	if (!loaded) return 1;
-
-	constexpr uint32_t frames = 256;
-	p->activate(p, 48000, 1, frames);
-	tlsAudio = true;
-	p->start_processing(p);
-	tlsAudio = false;
 	std::vector<float> l(frames), r(frames);
 	float *outs[2] = {l.data(), r.data()};
 	clap_audio_buffer out{outs, nullptr, 2, 0, 0};
-	auto block = [&](int key) {
+	auto block = [&](int key) { // one process block on p, with a note-on for `key` (-1: none); what the DAW got
 		InEvents in;
 		if (key >= 0) {
 			clap_event_note n{};
@@ -241,11 +254,22 @@ int main(int argc, char **argv) {
 	CHECK(seen.empty(), "an unreported change must not reach the DAW");
 	CHECK(std::fabs(afterSilent - -6.0) < 1e-9, "the table can't know an unreported change, got %.6f", afterSilent);
 
-	tlsAudio = true;
-	p->stop_processing(p);
-	tlsAudio = false;
-	p->deactivate(p);
-	p->destroy(p);
+	close(p);
+
+	// the same plugin with its Level on no macro: its gesture and value reach the table, not the DAW
+	session.macros.macros[0].targets.clear();
+	session.macros.macros[0].name = "Unmapped";
+	p = open(session);
+	if (!p) return 1;
+	state = (const clap_plugin_state *)p->get_extension(p, CLAP_EXT_STATE);
+	for (int i = 0; i < 4; ++i) block(-1);
+	seen = block(60);
+	block(-1);
+	const double unmapped = savedInnerValue(p, state, 0);
+	std::printf("unmapped, key 60: the DAW got %zu events, the table holds %.2f dB\n", seen.size(), unmapped);
+	CHECK(seen.empty(), "a gesture on a parameter no macro maps must not reach the DAW");
+	CHECK(std::fabs(unmapped - -6.0) < 1e-9, "the table should hold -6 dB, got %.6f", unmapped);
+	close(p);
 	entry->deinit();
 	std::printf(failures ? "%d failure(s)\n" : "PASS: the table and the DAW follow the plugin's reported changes\n", failures);
 	std::fflush(stdout);

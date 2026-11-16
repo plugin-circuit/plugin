@@ -19,6 +19,9 @@
 
 namespace plugincircuit {
 
+// Who is editing a parameter right now (docs/MESSAGING.md, "Gestures and ownership"). The DAW never owns one.
+enum class Owner : uint8_t { None, Ui, Plugin };
+
 class ParamTable {
 public:
 	explicit ParamTable(std::vector<ParamInfo> infos) : infos_(std::move(infos)) {
@@ -28,6 +31,8 @@ public:
 		words_ = (n + 63) / 64;
 		changed_ = std::make_unique<std::atomic<uint64_t>[]>(std::max<size_t>(words_, 1));
 		for (size_t w = 0; w < words_; ++w) changed_[w].store(0, std::memory_order_relaxed);
+		owners_ = std::make_unique<std::atomic<Owner>[]>(std::max<size_t>(n, 1));
+		for (size_t i = 0; i < n; ++i) owners_[i].store(Owner::None, std::memory_order_relaxed);
 		byId_.reserve(n);
 		for (size_t i = 0; i < n; ++i) byId_.push_back({infos_[i].id, uint32_t(i)});
 		std::sort(byId_.begin(), byId_.end(), [](const IdIndex &a, const IdIndex &b) { return a.id < b.id; });
@@ -60,6 +65,15 @@ public:
 	void setById(clap_id id, double v) {
 		const int i = indexOf(id);
 		if (i >= 0) set(size_t(i), v);
+	}
+
+	// Written by the thread that processes (the gesture state machine), read by the main thread.
+	Owner owner(size_t index) const { return owners_[index].load(std::memory_order_relaxed); }
+	void setOwner(size_t index, Owner o) { owners_[index].store(o, std::memory_order_relaxed); }
+
+	// Pushes the value again even though it didn't change (the end of a gesture: the final value). Real-time safe.
+	void markChanged(size_t index) {
+		if (index < infos_.size()) changed_[index / 64].fetch_or(uint64_t(1) << (index % 64), std::memory_order_release);
 	}
 
 	void markAllChanged() {
@@ -99,6 +113,7 @@ private:
 	std::vector<IdIndex> byId_;
 	std::unique_ptr<std::atomic<double>[]> values_;
 	std::unique_ptr<std::atomic<uint64_t>[]> changed_;
+	std::unique_ptr<std::atomic<Owner>[]> owners_;
 	size_t words_ = 0;
 };
 

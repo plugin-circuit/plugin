@@ -235,9 +235,9 @@ function renderKnobs() {
     el.querySelector(".name").ondblclick = (e) => openPopover(i, e.currentTarget);
     bindDrag(el.querySelector("svg"), "m" + i, () => state.values[i], (v, g) => {
       state.values[i] = v;
-      call("setMacro", { slot: i, value: v, gesture: g });
+      edit("macro", i, v, g);
       updateKnob(el, i);
-    }, "vertical", () => { call("setMacro", { slot: i, value: state.snap.macros[i].targets.length === 1 ? defaultOf(i) : 0.5, gesture: 3 }); });
+    }, "vertical", () => edit("macro", i, state.snap.macros[i].targets.length === 1 ? defaultOf(i) : 0.5, "set"));
     root.appendChild(el);
     updateKnob(el, i);
   });
@@ -263,6 +263,10 @@ function updateKnob(el, i) {
 function updateKnobs() { for (const el of document.querySelectorAll(".knob")) updateKnob(el, +el.dataset.slot); }
 
 // shared drag behaviour (knobs vertical, sliders horizontal); shift = fine; double-click = reset
+// One way to change a value (docs/MESSAGING.md): phase "begin" / "update" / "end" for a drag, "set" for a single change.
+function edit(target, id, value, phase) { call("edit", { target, id, value, phase }); }
+
+// set(value, phase) is called with "begin" on press, "update" while moving, "end" on release
 function bindDrag(target, key, get, set, axis, reset) {
   target.addEventListener("pointerdown", (e) => {
     e.preventDefault();
@@ -270,16 +274,16 @@ function bindDrag(target, key, get, set, axis, reset) {
     state.dragging.add(key);
     const rect = target.getBoundingClientRect();
     let last = axis === "vertical" ? e.clientY : e.clientX;
-    if (axis === "horizontal") set(Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)), 1);
-    else set(get(), 1);
+    if (axis === "horizontal") set(Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)), "begin");
+    else set(get(), "begin");
     const move = (ev) => {
       const pos = axis === "vertical" ? ev.clientY : ev.clientX;
       if (axis === "vertical") {
         const d = (last - pos) / (ev.shiftKey ? 800 : 160);
         last = pos;
-        set(Math.min(1, Math.max(0, get() + d)), 0);
+        set(Math.min(1, Math.max(0, get() + d)), "update");
       } else {
-        set(Math.min(1, Math.max(0, (pos - rect.left) / rect.width)), 0);
+        set(Math.min(1, Math.max(0, (pos - rect.left) / rect.width)), "update");
       }
     };
     let ended = false;
@@ -287,7 +291,7 @@ function bindDrag(target, key, get, set, axis, reset) {
       if (ended) return;
       ended = true;
       target.removeEventListener("pointermove", move);
-      set(get(), 2);
+      set(get(), "end");
       setTimeout(() => {
         state.dragging.delete(key);
         if (state.dragging.size === 0 && state.pendingRebuild) render(true);
@@ -407,18 +411,18 @@ function paramRow(p) {
   row.querySelector(".macro-tag").textContent = mi >= 0 ? "M" + (mi + 1) : "";
   row.querySelector(".macro-tag").title = mi >= 0 ? `Macro ${mi + 1}` : "";
   const norm = () => { const pv = state.paramValues.get(p.id); const v = pv ? pv.value : p.default; return p.max > p.min ? (v - p.min) / (p.max - p.min) : 0; };
-  bindDrag(row.querySelector(".slider"), "p" + p.id, norm, (n) => {
+  bindDrag(row.querySelector(".slider"), "p" + p.id, norm, (n, phase) => {
     let v = p.min + (p.max - p.min) * n;
     if (p.stepped) v = Math.round(v);
     const pv = state.paramValues.get(p.id) || { id: p.id, text: "" };
     const next = { ...pv, value: v }; // keep the last text until the plugin formats this value
     state.paramValues.set(p.id, next);
-    call("setParam", { id: p.id, value: v });
+    edit("param", p.id, v, phase);
     Promise.resolve(call("paramText", { id: p.id, value: v })).then((t) => {
       if (typeof t === "string" && t && state.paramValues.get(p.id) === next) { next.text = t; updateParam(row, p); }
     }).catch(() => {});
     updateParam(row, p);
-  }, "horizontal", () => call("setParam", { id: p.id, value: p.default }));
+  }, "horizontal", () => edit("param", p.id, p.default, "set"));
   updateParam(row, p);
   return row;
 }

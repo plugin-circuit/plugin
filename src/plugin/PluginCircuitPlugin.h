@@ -12,6 +12,7 @@
 #include "core/InnerHost.h"
 #include "core/PackageCache.h"
 #include "core/ParamTable.h"
+#include "plugin/Gestures.h"
 #include "plugin/Macros.h"
 #include "plugin/StateCodec.h"
 
@@ -46,8 +47,8 @@ public:
 	choc::value::Value uiSnapshot(bool full);
 	void uiLoad(const std::string &pluginId, const std::string &sha256);
 	void uiUnload();
-	void uiSetMacro(uint32_t slot, double normalized, int gesture); // gesture: 0 none, 1 begin, 2 end
-	void uiSetParam(clap_id id, double value);
+	// A value from our UI for a macro (normalized) or an inner parameter, with its gesture phase (docs/MESSAGING.md).
+	void uiEdit(bool macro, uint32_t id, double value, Phase phase);
 	void uiNote(int16_t key, double velocity, bool on); // on-screen keyboard
 	void uiAllNotesOff(); // releases every note the UI still holds (editor closed or hidden, plugin swapped)
 	void uiMapMacro(uint32_t slot, clap_id paramId, double minValue, double maxValue, bool add);
@@ -101,7 +102,8 @@ private:
 	};
 
 	struct UiEvent {
-		enum Kind : uint8_t { Macro, Param, GestureBegin, GestureEnd, NoteOn, NoteOff } kind;
+		enum Kind : uint8_t { Macro, Param, NoteOn, NoteOff } kind;
+		Phase phase;
 		uint32_t id;
 		double value;
 	};
@@ -249,6 +251,8 @@ private:
 	const clap_output_events *outerOut_ = nullptr; // valid during process
 	clap_output_events innerOut_;
 	static bool innerOutTryPush(const clap_output_events *list, const clap_event_header *event);
+	struct EventSink;
+	Gestures gestures_; // who owns which parameter; only the thread that processes touches it
 
 	// loading
 	std::thread loadThread_;

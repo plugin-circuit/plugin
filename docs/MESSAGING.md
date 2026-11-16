@@ -70,6 +70,10 @@ host, never back, so the DAW's automation is a plain writer.
 | WCLAP `GESTURE_END` | — | ignored | owner = none, forward to the DAW, mark changed |
 | DAW value (automation) | apply | dropped (touch) | dropped (touch) |
 
+The DAW is told gestures on macros, so a macro has an owner too: the owner of a gesture on it (a Macros drag) or on
+the one parameter it is a 1:1 view of. A parameter on a multi-target macro, or on none, gestures without the DAW
+hearing of it. Implemented in `src/plugin/Gestures.h`.
+
 A gesture still open after the plugin unloads, a `reset()`, or a skipped block's events lost to an overflow (see the
 bridge's event carry-over) is closed by the core: owner = none, a `GESTURE_END` to the DAW if it was told of a begin.
 

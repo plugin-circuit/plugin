@@ -472,6 +472,12 @@ struct Editor::Impl {
 			                                 "peakPpm", (int64_t)perf.peakPpm.exchange(0), "skipped",
 			                                 (int64_t)wclap_audio_skipped_blocks(), "blockFrames",
 			                                 (int64_t)perf.blockFrames.load(), "sampleRate", plugin.sampleRate());
+		} else if (method == "visibleParams") { // the Params view's rows in view: texts only for these
+			std::vector<clap_id> ids;
+			if (a.isObject() && a.hasObjectMember("ids") && a["ids"].isArray())
+				for (auto v : a["ids"])
+					if (v.isInt() || v.isFloat()) ids.push_back((clap_id)v.getWithDefault<int64_t>(0));
+			plugin.setVisibleParams(std::move(ids));
 		} else if (method == "settingsGet") {
 			const auto s = Settings::load();
 			return choc::value::createObject("Settings", "audioWaitRatio", double(s.audioWaitRatio), "concealDropouts",

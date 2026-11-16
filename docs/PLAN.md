@@ -84,6 +84,37 @@ not processing).
 - The main-thread block test, busy scenario, with the editor's real traffic instead of the synthetic loop: skipped
   blocks before and after (wait ratio Off, where contention shows most).
 
+## Phase 1b: the open points of phase 1 — M
+
+Status: done. 1b.1: loading Six Sines, the worst update went from 620 ms to 13 ms (8 ms text budget per update);
+the Params view keeps 20-40 rows in the page instead of 2,591, and rows scrolled into view get their texts within
+an update or two. Scrolling schedules on the next frame or after 50 ms, because WebKit throttles frames in a window
+it considers hidden. 1b.2: `tests/wclaps/` (built by CMake when Homebrew LLVM and wasm-ld are there),
+`test-param-events`, and `plugin-param-events`: the DAW gets macro 1's gesture begin, value and end, the table holds
+the reported value, and an unreported change reaches neither (removing the table update makes the test fail).
+
+**1b.1 Texts only for what the page shows** (the 620 ms after loading Six Sines). CLAP allows `value_to_text` only
+on the main thread, so the work can't move to another thread; the standard fixes are to do less and to split it:
+- *Virtualize the Params view* (as react-window does): only the rows in view, plus an overscan, exist in the page;
+  the page tells the core which parameter ids are visible (`visibleParams`).
+- *The core formats texts only for visible parameters* (plus macro targets, at most 64): a full update sends every
+  value but texts only for those; a changed value of a hidden parameter is sent without text (the page keeps its
+  old one until the row shows, then the core sends a fresh one).
+- *A time budget*: text formatting stops after 8 ms per update and continues on the next, so no update is a long
+  task (Chrome's threshold: 50 ms).
+- Measure: loading Six Sines, the first update's time (620 ms before).
+
+**1b.2 A test plugin that changes its own parameters** (the plugin-GUI path, untested in phase 1, and phase 2's
+base). The test WCLAPs move from the prototype (`webclap/examples/test-wclaps`) into `tests/wclaps/` with their
+build script; a new `test-param-events`:
+- one parameter (gain, dB, with text);
+- a note-on of key 60 makes it change its own parameter the way a GUI does: gesture begin, value, gesture end as
+  output events; key 61 changes it without reporting (for the safety net);
+- the same through its webview page (`[1, f32 dB]` set gain), for GUI tests later.
+- Test (`tests/plugin_param_events_test.cpp`): our plugin loads it from a local archive (offline, a scratch data
+  folder), processes notes; the DAW must receive the macro's gesture begin, value and end, and the table must hold
+  the new value (read back through a state save).
+
 ## Phase 2: gestures and ownership — M
 
 **2.1 `edit {target, id, value, phase}`** for macros and parameters (`begin` / `update` / `end` / `set`), replacing

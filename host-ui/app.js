@@ -37,8 +37,10 @@ window.plugincircuitHost = {
       hostTransport: s.hostTransport, transportPlaying: s.transportPlaying });
     s.macroValues.forEach((v, i) => { if (!state.dragging.has("m" + i)) state.values[i] = v; });
     // while a param is dragged its value is ours, but its text is always the plugin's
+    // texts come only for parameters the page shows (phase 1b): a value without one keeps the row's last text
     for (const pv of s.paramValues) {
       const cur = state.paramValues.get(pv.id);
+      if (pv.text === undefined) pv.text = cur ? cur.text : "";
       if (!state.dragging.has("p" + pv.id) || !cur) state.paramValues.set(pv.id, pv);
       else if (cur.value === pv.value) cur.text = pv.text;
     }
@@ -66,6 +68,7 @@ function setView(view, tellHost = true) {
   $("settingsBtn").setAttribute("aria-pressed", String(view === "settings"));
   if (view === "settings") { loadCaches(); loadSettings(); }
   if (window.__perf) window.__perf.active(view === "settings");
+  if (typeof scheduleVisibleParams === "function") scheduleVisibleParams(); // entering Params: rows + texts; leaving: none
   if (tellHost) {
     if (window.__debugViews) log("setView", view, new Error().stack.split("\n").slice(1, 4).join(" < "));
     call("view", { view });
@@ -367,49 +370,99 @@ function macroForParam(id) {
   return -1;
 }
 
+// The Params view is virtualized (docs/PLAN.md, phase 1b): a plugin may have thousands of parameters, so only the
+// rows in view (plus OVERSCAN above and below) exist in the page, and the core formats texts only for those.
+const ROW_H = 40, OVERSCAN = 8;
+const prows = { list: [], els: new Map(), sentIds: "" }; // list: {group} | {p}; els: index -> element
+
 function renderParams() {
   const root = $("params");
   const filter = $("paramFilter").value.trim().toLowerCase();
-  root.innerHTML = "";
   const params = state.snap.params.filter((p) => !p.hidden && (!filter || p.name.toLowerCase().includes(filter) || p.module.toLowerCase().includes(filter)));
   $("paramCount").textContent = `${params.length} of ${state.snap.params.length} parameters`;
+  prows.list = [];
   let group = null;
   for (const p of params) {
     if (p.module !== group) {
       group = p.module;
-      if (group) {
-        const g = document.createElement("div");
-        g.className = "group-title";
-        g.textContent = group;
-        root.appendChild(g);
-      }
+      if (group) prows.list.push({ group });
     }
-    const row = document.createElement("div");
-    row.className = "param";
-    row.dataset.id = p.id;
-    const mi = macroForParam(p.id);
-    row.innerHTML = `<span class="pname"></span><div class="slider"><span class="bar"></span><span class="thumb"></span></div><span class="ptext"></span><span class="macro-tag"></span>`;
-    row.querySelector(".pname").textContent = p.name;
-    row.querySelector(".pname").title = p.name;
-    row.querySelector(".macro-tag").textContent = mi >= 0 ? "M" + (mi + 1) : "";
-    row.querySelector(".macro-tag").title = mi >= 0 ? `Macro ${mi + 1}` : "";
-    const norm = () => { const pv = state.paramValues.get(p.id); const v = pv ? pv.value : p.default; return p.max > p.min ? (v - p.min) / (p.max - p.min) : 0; };
-    bindDrag(row.querySelector(".slider"), "p" + p.id, norm, (n) => {
-      let v = p.min + (p.max - p.min) * n;
-      if (p.stepped) v = Math.round(v);
-      const pv = state.paramValues.get(p.id) || { id: p.id, text: "" };
-      const next = { ...pv, value: v }; // keep the last text until the plugin formats this value
-      state.paramValues.set(p.id, next);
-      call("setParam", { id: p.id, value: v });
-      Promise.resolve(call("paramText", { id: p.id, value: v })).then((t) => {
-        if (typeof t === "string" && t && state.paramValues.get(p.id) === next) { next.text = t; updateParam(row, p); }
-      }).catch(() => {});
-      updateParam(row, p);
-    }, "horizontal", () => call("setParam", { id: p.id, value: p.default }));
-    root.appendChild(row);
-    updateParam(row, p);
+    prows.list.push({ p });
   }
+  root.innerHTML = "";
+  prows.els.clear();
+  root.style.height = `${prows.list.length * ROW_H}px`;
+  renderVisibleParams();
 }
+
+function paramRow(p) {
+  const row = document.createElement("div");
+  row.className = "param";
+  row.dataset.id = p.id;
+  const mi = macroForParam(p.id);
+  row.innerHTML = `<span class="pname"></span><div class="slider"><span class="bar"></span><span class="thumb"></span></div><span class="ptext"></span><span class="macro-tag"></span>`;
+  row.querySelector(".pname").textContent = p.name;
+  row.querySelector(".pname").title = p.name;
+  row.querySelector(".macro-tag").textContent = mi >= 0 ? "M" + (mi + 1) : "";
+  row.querySelector(".macro-tag").title = mi >= 0 ? `Macro ${mi + 1}` : "";
+  const norm = () => { const pv = state.paramValues.get(p.id); const v = pv ? pv.value : p.default; return p.max > p.min ? (v - p.min) / (p.max - p.min) : 0; };
+  bindDrag(row.querySelector(".slider"), "p" + p.id, norm, (n) => {
+    let v = p.min + (p.max - p.min) * n;
+    if (p.stepped) v = Math.round(v);
+    const pv = state.paramValues.get(p.id) || { id: p.id, text: "" };
+    const next = { ...pv, value: v }; // keep the last text until the plugin formats this value
+    state.paramValues.set(p.id, next);
+    call("setParam", { id: p.id, value: v });
+    Promise.resolve(call("paramText", { id: p.id, value: v })).then((t) => {
+      if (typeof t === "string" && t && state.paramValues.get(p.id) === next) { next.text = t; updateParam(row, p); }
+    }).catch(() => {});
+    updateParam(row, p);
+  }, "horizontal", () => call("setParam", { id: p.id, value: p.default }));
+  updateParam(row, p);
+  return row;
+}
+
+// Adds the rows that came into view, removes the ones that left (rows kept in view stay: a drag isn't cut off), and
+// tells the core which parameters are visible.
+function renderVisibleParams() {
+  if (state.view !== "params" || !prows.list.length) { sendVisibleParams([]); return; }
+  const view = $("viewParams"), root = $("params");
+  const top = view.scrollTop - root.offsetTop;
+  const first = Math.max(0, Math.floor(top / ROW_H) - OVERSCAN);
+  const last = Math.min(prows.list.length, Math.ceil((top + view.clientHeight) / ROW_H) + OVERSCAN);
+  for (const [i, el] of prows.els) {
+    if (i < first || i >= last) { el.remove(); prows.els.delete(i); }
+  }
+  for (let i = first; i < last; ++i) {
+    if (prows.els.has(i)) continue;
+    const item = prows.list[i];
+    let el;
+    if (item.group) { el = document.createElement("div"); el.className = "group-title"; el.textContent = item.group; }
+    else el = paramRow(item.p);
+    el.classList.add("vrow");
+    el.style.top = `${i * ROW_H}px`;
+    root.appendChild(el);
+    prows.els.set(i, el);
+  }
+  sendVisibleParams([...prows.els.values()].filter((el) => el.dataset.id).map((el) => Number(el.dataset.id)));
+}
+function sendVisibleParams(ids) {
+  const key = ids.join(",");
+  if (key === prows.sentIds) return;
+  prows.sentIds = key;
+  call("visibleParams", { ids });
+}
+// on the next frame, or after 50 ms if WebKit throttles frames (a window it considers hidden)
+let visiblePending = false;
+function scheduleVisibleParams() {
+  if (visiblePending) return;
+  visiblePending = true;
+  const run = () => { if (!visiblePending) return; visiblePending = false; renderVisibleParams(); };
+  requestAnimationFrame(run);
+  setTimeout(run, 50);
+}
+$("viewParams").addEventListener("scroll", scheduleVisibleParams, { passive: true });
+window.addEventListener("resize", () => renderVisibleParams());
 
 function updateParam(row, p) {
   const pv = state.paramValues.get(p.id);
@@ -421,10 +474,9 @@ function updateParam(row, p) {
 }
 function updateParams() {
   if (state.view !== "params" || !state.snap) return;
-  const byId = new Map(state.snap.params.map((p) => [p.id, p]));
-  for (const row of document.querySelectorAll(".param")) {
-    const p = byId.get(+row.dataset.id);
-    if (p) updateParam(row, p);
+  for (const [i, row] of prows.els) { // only the rendered rows
+    const item = prows.list[i];
+    if (item && item.p) updateParam(row, item.p);
   }
 }
 $("paramFilter").addEventListener("input", () => renderParams());

@@ -1063,13 +1063,24 @@ choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 	auto *table = paramTable();
 	static const std::vector<ParamInfo> noParams;
 	const auto &params = table ? table->infos() : noParams;
-	// values from the table, never from the plugin: all on a full snapshot (the page rebuilds), else only changed ones
+	// Values from the table, never from the plugin: all on a full snapshot (the page rebuilds), else only changed ones.
+	// Texts only for what the page shows (and macro targets), within a time budget: value_to_text is a call into the
+	// plugin (main thread only, CLAP), and formatting thousands at once froze the main thread (620 ms, Six Sines).
 	auto paramValues = choc::value::createEmptyArray();
 	if (table) {
+		constexpr auto kTextBudget = std::chrono::milliseconds(8);
+		const auto deadline = std::chrono::steady_clock::now() + kTextBudget;
 		auto add = [&](size_t i) {
+			const auto id = table->info(i).id;
 			const double v = table->value(i);
-			paramValues.addArrayElement(choc::value::createObject("PV", "id", (int64_t)table->info(i).id, "value", v, "text",
-			                                                      paramTextCached(table->info(i).id, v)));
+			if (wantsText(id)) {
+				if (std::chrono::steady_clock::now() < deadline) {
+					paramValues.addArrayElement(choc::value::createObject("PV", "id", (int64_t)id, "value", v, "text", paramTextCached(id, v)));
+					return;
+				}
+				pendingTexts_.push_back(id); // out of time: next update
+			}
+			paramValues.addArrayElement(choc::value::createObject("PV", "id", (int64_t)id, "value", v)); // keeps its last text
 		};
 		if (full) {
 			table->takeChanged([](size_t) {});
@@ -1077,6 +1088,16 @@ choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 		} else {
 			table->takeChanged(add);
 		}
+		// texts still owed (rows that just came into view, or over budget before)
+		size_t done = 0;
+		while (done < pendingTexts_.size() && std::chrono::steady_clock::now() < deadline) {
+			const auto id = pendingTexts_[done++];
+			const int i = table->indexOf(id);
+			if (i < 0 || !wantsText(id)) continue;
+			const double v = table->value(size_t(i));
+			paramValues.addArrayElement(choc::value::createObject("PV", "id", (int64_t)id, "value", v, "text", paramTextCached(id, v)));
+		}
+		pendingTexts_.erase(pendingTexts_.begin(), pendingTexts_.begin() + std::ptrdiff_t(done));
 	}
 	snap.addMember("paramValues", paramValues);
 	if (!full) return snap;
@@ -1155,6 +1176,23 @@ void PluginCircuitPlugin::reconcileParams(size_t count) {
 		double v;
 		if (current_->inner->paramValue(table->info(i).id, v)) table->set(i, v); // marks it changed if the plugin moved it
 	}
+}
+
+
+bool PluginCircuitPlugin::wantsText(clap_id id) const {
+	if (std::binary_search(visibleParams_.begin(), visibleParams_.end(), id)) return true;
+	if (auto *map = macros_.load(std::memory_order_acquire)) // macro targets: the Macros view shows their text
+		for (auto &m : map->macros)
+			for (auto &t : m.targets)
+				if (t.paramId == id) return true;
+	return false;
+}
+
+void PluginCircuitPlugin::setVisibleParams(std::vector<clap_id> ids) {
+	std::sort(ids.begin(), ids.end());
+	for (auto id : ids) // newly visible: a fresh text on the next update (the page kept a possibly stale one)
+		if (!std::binary_search(visibleParams_.begin(), visibleParams_.end(), id)) pendingTexts_.push_back(id);
+	visibleParams_ = std::move(ids);
 }
 
 } // namespace plugincircuit

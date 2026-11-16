@@ -196,6 +196,9 @@ public:
 	ParamTable *paramTable() const { return current_ ? current_->params.load(std::memory_order_acquire) : nullptr; } // main thread
 	std::string paramTextCached(clap_id id, double value); // main thread: value_to_text, cached per (id, value)
 	void reconcileParams(size_t count); // main thread: the safety net, re-reads `count` values round-robin
+	// The parameters the page shows (its virtualized Params view): texts are formatted only for these and for macro
+	// targets. Newly visible ones get a fresh text on the next update.
+	void setVisibleParams(std::vector<clap_id> ids); // main thread
 
 private:
 	void buildParamTable(Slot &slot);                        // main thread: (re)build from the plugin, then publish
@@ -210,6 +213,9 @@ private:
 	};
 	std::unordered_map<TextKey, std::string, TextKeyHash> textCache_;
 	size_t reconcileNext_ = 0;
+	std::vector<clap_id> visibleParams_;  // sorted
+	std::vector<clap_id> pendingTexts_;   // visible parameters still owed a text (formatting is time-budgeted)
+	bool wantsText(clap_id id) const;
 	std::array<std::atomic<double>, kNumMacros> macroValues_{};
 	std::atomic<uint64_t> processEpoch_{0};
 	// Hosts without a transport (clap-wrapper's standalone passes none): our own 120 bpm 4/4 transport, started

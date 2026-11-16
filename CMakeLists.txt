@@ -148,6 +148,27 @@ enable_testing()
 add_executable(plugincircuit-editor-layout-test tests/editor_layout_test.cpp)
 target_include_directories(plugincircuit-editor-layout-test PRIVATE src)
 add_test(NAME editor-layout COMMAND plugincircuit-editor-layout-test)
+# Test WCLAPs (tests/wclaps): freestanding C, built with Homebrew LLVM (clang with wasm32) and wasm-ld when available
+find_program(WASM_LD_EXECUTABLE wasm-ld)
+if (APPLE AND EXISTS /opt/homebrew/opt/llvm/bin/clang AND WASM_LD_EXECUTABLE)
+	set(TEST_WCLAPS_DIR ${CMAKE_BINARY_DIR}/test-wclaps)
+	add_custom_command(OUTPUT ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz
+		COMMAND ${CMAKE_COMMAND} -E env OUT=${TEST_WCLAPS_DIR} CLAP_INCLUDE=${wclap-bridge_SOURCE_DIR}/modules/clap/include
+			bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/build.sh
+		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/src/plugin.c ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/src/rt.c
+			${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/build.sh
+		COMMENT "Building the test WCLAPs")
+	add_custom_target(test-wclaps ALL DEPENDS ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz)
+	if (PLUGINCIRCUIT_BUILD_PLUGIN)
+		# the hosted plugin changes its own parameter: the DAW and the parameter table must follow (PLAN.md 1b.2)
+		add_executable(plugincircuit-plugin-param-events-test tests/plugin_param_events_test.cpp src/plugin/StateCodec.cpp src/plugin/Macros.cpp)
+		target_include_directories(plugincircuit-plugin-param-events-test PRIVATE src)
+		target_link_libraries(plugincircuit-plugin-param-events-test PRIVATE plugincircuit-core)
+		add_dependencies(plugincircuit-plugin-param-events-test test-wclaps PluginCircuit_clap)
+		add_test(NAME plugin-param-events COMMAND plugincircuit-plugin-param-events-test
+			${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz)
+	endif()
+endif()
 add_executable(plugincircuit-param-table-test tests/param_table_test.cpp)
 target_include_directories(plugincircuit-param-table-test PRIVATE src ${wclap-bridge_SOURCE_DIR}/modules/clap/include)
 add_test(NAME param-table COMMAND plugincircuit-param-table-test)

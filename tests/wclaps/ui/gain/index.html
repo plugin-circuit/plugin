@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Test Gain</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14171c; color: #e8e6e1; font: 14px/1.4 system-ui, sans-serif; }
+  main { display: flex; flex-direction: column; justify-content: center; gap: 14px; height: 100%; padding: 0 28px; box-sizing: border-box; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .02em; }
+  .row { display: flex; align-items: center; gap: 14px; }
+  input[type=range] { flex: 1; accent-color: #f2c94c; }
+  output { min-width: 72px; text-align: right; font-variant-numeric: tabular-nums; }
+  small { color: #8b8f97; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Test Gain</h1>
+  <div class="row">
+    <input id="gain" type="range" min="-60" max="12" step="0.1" value="0" aria-label="Gain">
+    <output id="text">0.0 dB</output>
+  </div>
+  <small id="status">waiting for the plugin…</small>
+</main>
+<script>
+  // Protocol (little endian): page -> plugin [0] hello, [1, f32 dB] set; plugin -> page [2, f32 dB] value
+  const slider = document.getElementById("gain")
+  const text = document.getElementById("text")
+  const status = document.getElementById("status")
+  const show = (db) => { text.textContent = db.toFixed(1) + " dB" }
+  const send = (bytes) => window.parent.postMessage(bytes.buffer, "*")
+
+  window.addEventListener("message", (event) => {
+    if (!(event.data instanceof ArrayBuffer)) return
+    const view = new DataView(event.data)
+    if (view.byteLength >= 5 && view.getUint8(0) === 2) {
+      const db = view.getFloat32(1, true)
+      slider.value = String(db)
+      show(db)
+      status.textContent = "connected"
+    }
+  })
+
+  slider.addEventListener("input", () => {
+    const db = Number(slider.value)
+    const msg = new Uint8Array(5)
+    msg[0] = 1
+    new DataView(msg.buffer).setFloat32(1, db, true)
+    send(msg)
+    show(db)
+  })
+
+  send(new Uint8Array([0]))
+</script>
+</body>
+</html>

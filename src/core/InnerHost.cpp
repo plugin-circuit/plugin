@@ -62,10 +62,17 @@ struct InnerHostExt {
 	};
 	static constexpr clap_host_note_ports notePorts = {
 		.supported_dialects = [](const clap_host *) -> uint32_t { return CLAP_NOTE_DIALECT_CLAP | CLAP_NOTE_DIALECT_MIDI; },
-		.rescan = [](const clap_host *, uint32_t) {},
+		// our note-dialect conversion is chosen in activate(): a change of the WCLAP's note ports needs a restart
+		.rescan = [](const clap_host *h, uint32_t) {
+			auto &c = cb(h);
+			if (c.requestRestart) c.requestRestart();
+		},
 	};
 	static constexpr clap_host_tail tail = {
-		.changed = [](const clap_host *) {},
+		.changed = [](const clap_host *h) { // [audio-thread]
+			auto &c = cb(h);
+			if (c.tailChanged) c.tailChanged();
+		},
 	};
 };
 
@@ -143,6 +150,7 @@ std::unique_ptr<InnerPlugin> InnerPlugin::create(std::shared_ptr<WclapModule> mo
 	self->audioPorts_ = (const clap_plugin_audio_ports *)ext(CLAP_EXT_AUDIO_PORTS);
 	self->notePorts_ = (const clap_plugin_note_ports *)ext(CLAP_EXT_NOTE_PORTS);
 	self->timerSupport_ = (const clap_plugin_timer_support *)ext(CLAP_EXT_TIMER_SUPPORT);
+	self->tail_ = (const clap_plugin_tail *)ext(CLAP_EXT_TAIL);
 	self->readPortLayout();
 	return self;
 }
@@ -387,6 +395,8 @@ bool InnerPlugin::loadState(const std::vector<uint8_t> &in) {
 	};
 	return state_->load(plugin_, &is);
 }
+
+uint32_t InnerPlugin::tail() const { return tail_ ? tail_->get(plugin_) : 0; }
 
 uint32_t InnerPlugin::latency() const {
 	return (latency_ && active_) ? latency_->get(plugin_) : 0;

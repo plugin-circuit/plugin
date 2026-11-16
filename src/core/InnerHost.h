@@ -27,6 +27,7 @@ struct InnerHostCallbacks {
 	std::function<void()> paramsRequestFlush;
 	std::function<void()> stateMarkDirty;
 	std::function<void()> latencyChanged;
+	std::function<void()> tailChanged;       // [audio-thread], from the WCLAP's process
 	std::function<bool(uint32_t w, uint32_t h)> guiRequestResize;
 	std::function<bool(uint32_t periodMs, clap_id *timerId)> registerTimer;
 	std::function<bool(clap_id timerId)> unregisterTimer;
@@ -70,6 +71,7 @@ public:
 	bool loadState(const std::vector<uint8_t> &in);
 
 	uint32_t latency() const;
+	uint32_t tail() const;        // [main-thread, audio-thread]: samples; >= INT32_MAX means infinite, 0 without clap.tail
 	const clap_plugin_gui *gui() const { return gui_; }
 	bool hasNoteInput() const { return noteInputPorts_ > 0; }
 	bool supportsMpe() const { return mpe_; } // a note input declares the MIDI-MPE dialect
@@ -110,6 +112,7 @@ private:
 	const clap_plugin_audio_ports *audioPorts_ = nullptr;
 	const clap_plugin_note_ports *notePorts_ = nullptr;
 	const clap_plugin_timer_support *timerSupport_ = nullptr;
+	const clap_plugin_tail *tail_ = nullptr;
 
 	// port layout + preallocated scratch
 	std::vector<uint32_t> inPortChannels_, outPortChannels_;

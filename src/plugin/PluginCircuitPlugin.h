@@ -149,6 +149,16 @@ private:
 	const clap_host_params *hostParams_ = nullptr;
 	const clap_host_state *hostState_ = nullptr;
 	const clap_host_latency *hostLatency_ = nullptr;
+	const clap_host_tail *hostTail_ = nullptr;
+	// The WCLAP's tail, for the DAW's clap.tail (read on main and audio threads). tailNotify_: tell the DAW on the next
+	// block (clap_host_tail.changed is [audio-thread]); tailDirty_: the WCLAP said its tail changed, re-read it there.
+	std::atomic<uint32_t> tailSamples_{0};
+	std::atomic<bool> tailNotify_{false}, tailDirty_{false};
+	// The last status the WCLAP returned: if it allows sleeping, UI input asks the DAW to process again.
+	std::atomic<int32_t> lastStatus_{CLAP_PROCESS_CONTINUE};
+	void wakeIfSleeping() {
+		if (lastStatus_.load(std::memory_order_relaxed) != CLAP_PROCESS_CONTINUE) host_->request_process(host_);
+	}
 	const clap_host_gui *hostGui_ = nullptr;
 	const clap_host_timer_support *hostTimer_ = nullptr;
 	const clap_host_log *hostLog_ = nullptr;

@@ -9,6 +9,11 @@ change.
 
 ## Phase 0: fixes found in the audit (independent, do first) — S each
 
+Status: done. 0.1 tested by `tests/host-ui/picker_messages.ts` (the old listener let a rogue frame and a same-origin
+frame load plugins). 0.2: OpenRB Delay reports a 292,883-sample tail, [Basics] Reverb 144,000 (`inner-tail` test);
+no catalog plugin returns `SLEEP` today, so the status pass-through and the wake on UI input are untested against a
+real plugin. 0.3 has no plugin that changes its note ports to test against.
+
 **0.1 Picker messages only from the picker.** `host-ui/app.js` (`message` listener): accept `plugincircuit:select` /
 `cancel` only if `e.source === $("picker").contentWindow` and `e.origin === new URL(apiBase()).origin`.
 - Test: a headless host-UI test (Playwright, like the keyboard test) where a second iframe posts `select`: nothing

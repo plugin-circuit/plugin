@@ -84,7 +84,16 @@ function ensurePicker(force = false) {
     .catch((err) => { log("catalog health check failed:", err); document.body.classList.add("offline"); renderInstalled(); });
 }
 
+// Messages from the catalog's picker: only from our picker iframe, served by the catalog. Anything else in the page
+// (a plugin's own iframe, an ad, a compromised page) must not be able to load plugins.
+function fromPicker(e) {
+  const picker = $("picker");
+  if (!picker || e.source !== picker.contentWindow) return false;
+  try { return e.origin === new URL(apiBase()).origin; } catch (err) { return false; }
+}
+
 window.addEventListener("message", (e) => {
+  if (!fromPicker(e)) return;
   const d = e.data || {};
   if (d.type === "plugincircuit:select" && d.pluginId) {
     call("load", { pluginId: d.pluginId, sha256: d.sha256 || "" });

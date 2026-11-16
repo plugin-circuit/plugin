@@ -199,6 +199,8 @@ int main(int argc, char **argv) {
 		float *outs[2] = {outL.data(), outR.data()};
 		uint32_t rng = 1234;
 		double sumSq = 0, peak = 0, worstBlockMs = 0, totalMs = 0;
+		int64_t statuses[5] = {0, 0, 0, 0, 0}; // error, continue, continue-if-not-quiet, tail, sleep
+		int64_t tailSamples = 0;
 		bool nan = false;
 		uint32_t outEvents = 0;
 
@@ -224,7 +226,8 @@ int main(int argc, char **argv) {
 				tlsAudio = true;
 				auto tb = std::chrono::steady_clock::now();
 				auto transport = transportAt((int64_t)b * frames, sr, true);
-				inner->process(ins, 2, outs, 2, frames, (int64_t)b * frames, noTransport ? nullptr : &transport, &events.in, &sink.out);
+				const auto status = inner->process(ins, 2, outs, 2, frames, (int64_t)b * frames, noTransport ? nullptr : &transport, &events.in, &sink.out);
+				statuses[std::min<int>(int(status), 4)]++;
 				double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tb).count();
 				tlsAudio = false;
 				totalMs += ms;
@@ -290,6 +293,7 @@ int main(int argc, char **argv) {
 				r.addMember("reportedLatency", (int64_t)inner->latency());
 				r.addMember("measuredDelay", delay); // -1: no response within 1 s
 			}
+			tailSamples = (int64_t)inner->tail(); // read while the plugin exists
 			tlsAudio = true;
 			inner->stopProcessing();
 			tlsAudio = false;
@@ -317,6 +321,8 @@ int main(int argc, char **argv) {
 		inner.reset();
 		if (!r.hasObjectMember("ok")) {
 			bool silent = rms < 1e-6;
+			r.addMember("tail", tailSamples); // samples; >= INT32_MAX: infinite
+			r.addMember("statuses", choc::value::createVector(statuses, 5));
 			r.addMember("ok", !nan);
 			r.addMember("silent", silent);
 		}

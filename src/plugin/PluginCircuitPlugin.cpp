@@ -62,6 +62,9 @@ struct PluginGlue {
 		.save = [](const clap_plugin *p, const clap_ostream *s) { return self(p)->stateSave(s); },
 		.load = [](const clap_plugin *p, const clap_istream *s) { return self(p)->stateLoad(s); },
 	};
+	static constexpr clap_plugin_tail tail = { // the WCLAP's ([main-thread, audio-thread]: an atomic)
+		.get = [](const clap_plugin *p) { return self(p)->tailSamples_.load(std::memory_order_relaxed); },
+	};
 	static constexpr clap_plugin_latency latency = {
 		.get = [](const clap_plugin *p) { return self(p)->latencyGet(); },
 	};
@@ -141,6 +144,7 @@ bool PluginCircuitPlugin::init() {
 	hostParams_ = (const clap_host_params *)ext(CLAP_EXT_PARAMS);
 	hostState_ = (const clap_host_state *)ext(CLAP_EXT_STATE);
 	hostLatency_ = (const clap_host_latency *)ext(CLAP_EXT_LATENCY);
+	hostTail_ = (const clap_host_tail *)ext(CLAP_EXT_TAIL);
 	hostGui_ = (const clap_host_gui *)ext(CLAP_EXT_GUI);
 	hostTimer_ = (const clap_host_timer_support *)ext(CLAP_EXT_TIMER_SUPPORT);
 	hostLog_ = (const clap_host_log *)ext(CLAP_EXT_LOG);
@@ -396,6 +400,7 @@ clap_process_status PluginCircuitPlugin::processBlock(const clap_process *p) {
 	if (slot && !slot->started && slot->inner->isActive()) slot->started = slot->inner->startProcessing();
 
 	translateEvents(p->in_events, slot, map, true, true);
+	clap_process_status status = CLAP_PROCESS_CONTINUE; // the WCLAP's status (its tail / sleep), when it ran
 	if (!slot || !slot->started || p->audio_outputs_count == 0) {
 		passThrough(p);
 	} else {
@@ -406,13 +411,20 @@ clap_process_status PluginCircuitPlugin::processBlock(const clap_process *p) {
 			in = p->audio_inputs[0].data32;
 			inChannels = p->audio_inputs[0].channel_count;
 		}
-		slot->inner->process(in, inChannels, out.data32, out.channel_count, p->frames_count, p->steady_time, transportFor(p),
-		                     &innerIn_.list, &innerOut_);
+		status = slot->inner->process(in, inChannels, out.data32, out.channel_count, p->frames_count, p->steady_time,
+		                              transportFor(p), &innerIn_.list, &innerOut_);
+		if (status == CLAP_PROCESS_ERROR) status = CLAP_PROCESS_CONTINUE; // the WCLAP's error isn't the DAW's to handle
+		if (tailDirty_.exchange(false, std::memory_order_relaxed)) {
+			tailSamples_.store(slot->inner->tail(), std::memory_order_relaxed);
+			tailNotify_.store(true, std::memory_order_relaxed);
+		}
 	}
+	if (tailNotify_.exchange(false, std::memory_order_relaxed) && hostTail_) hostTail_->changed(host_);
+	lastStatus_.store(status, std::memory_order_relaxed);
 	unlockInner();
 	outerOut_ = nullptr;
 	processEpoch_.fetch_add(1, std::memory_order_release);
-	return CLAP_PROCESS_CONTINUE;
+	return status;
 }
 
 // ---- extensions ------------------------------------------------------------------------------------
@@ -422,6 +434,7 @@ const void *PluginCircuitPlugin::getExtension(const char *id) {
 	if (!std::strcmp(id, CLAP_EXT_PARAMS)) return &PluginGlue::params;
 	if (!std::strcmp(id, CLAP_EXT_STATE)) return &PluginGlue::state;
 	if (!std::strcmp(id, CLAP_EXT_LATENCY)) return &PluginGlue::latency;
+	if (!std::strcmp(id, CLAP_EXT_TAIL)) return &PluginGlue::tail;
 	if (!std::strcmp(id, CLAP_EXT_TIMER_SUPPORT)) return &PluginGlue::timer;
 	if (!std::strcmp(id, CLAP_EXT_GUI)) return &PluginGlue::gui;
 	return nullptr;
@@ -719,6 +732,7 @@ InnerHostCallbacks PluginCircuitPlugin::makeInnerCallbacks() {
 	cb.paramsRequestFlush = [this] { if (hostParams_) hostParams_->request_flush(host_); };
 	cb.stateMarkDirty = [this] { markDirty(); };
 	cb.latencyChanged = [this] { host_->request_restart(host_); };
+	cb.tailChanged = [this] { tailDirty_.store(true, std::memory_order_relaxed); }; // [audio-thread]: handled after its process
 	cb.guiRequestResize = [this](uint32_t w, uint32_t h) {
 		if (!isMainThread()) { // [thread-safe]: hand it to the main thread; the editor may be closing right now
 			pendingInnerResize.store((uint64_t(w) << 32) | h, std::memory_order_release);
@@ -774,6 +788,8 @@ void PluginCircuitPlugin::finishLoad(std::unique_ptr<LoadJob> job) {
 		}
 		publishMacros(std::move(map));
 	}
+	tailSamples_.store(slot->inner->tail(), std::memory_order_relaxed);
+	tailNotify_.store(true, std::memory_order_relaxed);
 	swapIn(std::move(slot));
 	setStatus(Status::Ready, job->meta.name);
 	if (hostParams_) hostParams_->rescan(host_, CLAP_PARAM_RESCAN_INFO | CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_TEXT);
@@ -866,6 +882,8 @@ void PluginCircuitPlugin::uiLoad(const std::string &pluginId, const std::string 
 }
 
 void PluginCircuitPlugin::uiUnload() {
+	tailSamples_.store(0, std::memory_order_relaxed); // no plugin, no tail
+	tailNotify_.store(true, std::memory_order_relaxed);
 	if (!current_ && !missingState_) return;
 	uiAllNotesOff();
 	if (editor_) editor_->innerWillChange();
@@ -890,6 +908,7 @@ void PluginCircuitPlugin::uiUnload() {
 }
 
 void PluginCircuitPlugin::uiSetMacro(uint32_t slot, double normalized, int gesture) {
+	wakeIfSleeping(); // a WCLAP that returned SLEEP isn't processed until the DAW is asked
 	if (slot >= kNumMacros) return;
 	normalized = normalized < 0 ? 0 : (normalized > 1 ? 1 : normalized);
 	std::lock_guard<std::mutex> lock(uiPushMutex_);
@@ -901,12 +920,14 @@ void PluginCircuitPlugin::uiSetMacro(uint32_t slot, double normalized, int gestu
 }
 
 void PluginCircuitPlugin::uiSetParam(clap_id id, double value) {
+	wakeIfSleeping(); // a WCLAP that returned SLEEP isn't processed until the DAW is asked
 	std::lock_guard<std::mutex> lock(uiPushMutex_);
 	uiEvents_.push({UiEvent::Param, id, value});
 	if (!processing_ && hostParams_) hostParams_->request_flush(host_);
 }
 
 void PluginCircuitPlugin::uiNote(int16_t key, double velocity, bool on) {
+	wakeIfSleeping(); // a WCLAP that returned SLEEP isn't processed until the DAW is asked
 	if (key < 0 || key > 127) return;
 	std::lock_guard<std::mutex> lock(uiPushMutex_);
 	// A failed push (queue full) keeps the held bit as it was: a lost note-on is not held, a lost note-off still is,
@@ -966,6 +987,7 @@ void PluginCircuitPlugin::uiRenameMacro(uint32_t slot, const std::string &name) 
 }
 
 void PluginCircuitPlugin::uiSetTransport(bool playing) {
+	wakeIfSleeping(); // a WCLAP that returned SLEEP isn't processed until the DAW is asked
 	if (playing && !fallbackPlaying_.load()) fallbackRewind_.store(true, std::memory_order_release); // play starts at bar 1
 	fallbackPlaying_.store(playing);
 	stateVersion_++;

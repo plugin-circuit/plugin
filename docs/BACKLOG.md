@@ -23,12 +23,35 @@ in upstream code are listed in `UPSTREAM.md`.
 - **Single webview (iframe) hosting.** Considered and parked: the two-view design works and is tested; an iframe would
   mean serving the WCLAP's files and relaying its messages ourselves.
 
-## Platforms
+## Platforms (Windows, Linux)
 
-- **Windows editor:** `Editor_win.cpp` with a child HWND and CHOC's WebView2 view. `src/gui/Editor.mm` is compiled
-  unconditionally today, so Windows doesn't build. The bridge's webview-gui has a CHOC backend for the plugin's own UI
-  (untested on Windows).
-- **Linux** after Windows (embedded CHOC webviews are reported to render black on Linux; needs checking).
+Everything below is macOS-only or unverified today. Order: what blocks a Windows build first.
+
+1. **Editor.** `src/gui/Editor.mm` is macOS-only and compiled unconditionally, so the plugin doesn't build on Windows
+   or Linux. Needed: `Editor_win.cpp` (child HWND + CHOC's WebView2 view), later Linux (X11 + WebKitGTK). With it, the
+   macOS-only parts of the editor need equivalents: layout from the real bounds (the resize fix), the hosted GUI's
+   background color sampling (no white flash), forwarding note keys from a focused plugin GUI to the on-screen
+   keyboard (an `NSEvent` monitor today).
+2. **Data folder.** `Paths::root()` is always `$HOME/Library/Application Support/Plugin Circuit` (the macOS path).
+   Windows: `%APPDATA%\Plugin Circuit` (`SHGetKnownFolderPath(FOLDERID_RoamingAppData)`); Linux:
+   `$XDG_DATA_HOME/plugin-circuit` (default `~/.local/share`). Covers the package cache, compiled-code cache,
+   `settings.json`, per-plugin data.
+3. **webview-gui's CHOC backend** (Windows, Linux) still has the bugs fixed only in the macOS backend:
+   messages to the page without `event.source` (Surge XT's presets would fail), the base64 fallback's length bug,
+   non-binary page messages forwarded, and no context-menu / scroll-bar policy (WebView2 shows its browser menu by
+   default). Fix: one shared init script for both backends so they can't drift again; per-platform native parts
+   stay separate. Verify there: file pickers, `alert`/`confirm`, downloads (WebView2 / WebKitGTK should handle them
+   by default; not checked).
+4. **Package in-use lock on Windows.** `PackageCache::InUse` is a no-op there (`LockFileEx` / `UnlockFileEx` on
+   `<package>/.lock`), so a loaded plugin's package can be deleted from the settings page.
+5. **Linux webviews:** an embedded CHOC webview is reported to render black on some systems; needs checking.
+6. **Tests and CI.** The editor resize GUI test is macOS-only (`tests/editor_resize_test.mm`); no Windows / Linux
+   CI for the plugin. Add build + unit-test jobs (editor-layout, dropout-concealer, main-thread-block) for both, and a
+   GUI test once the editors exist.
+
+Already portable (no work expected): the bridge's non-blocking audio lock and dropout concealment (`cpuRelax` covers
+x86 and ARM; `steady_clock` is QueryPerformanceCounter on Windows), the cache logic apart from the lock, settings,
+the performance meter, networking (tanh-net has WinHTTP and curl backends).
 
 ## Caches
 
@@ -37,7 +60,6 @@ in upstream code are listed in `UPSTREAM.md`.
   Settings > Cache lists them and deletes selected / unused for 30 days / all, and clears compiled code.
 - **Automatic eviction** for packages: a size budget (e.g. 4 GB), evicting try-outs (never saved in a session) and the
   least recently used first, never anything in use. Today packages only go when the user deletes them.
-- **Windows:** the in-use lock (`PackageCache::InUse`) is a no-op there; needs `LockFileEx`.
 - **Catalog keeps every published version** (content-addressed by sha256), so an evicted package an old session needs
   can be downloaded again. Server-side guarantee, not enforced yet.
 - Wasmtime's old default cache (`~/Library/Caches/BytecodeAlliance.wasmtime`) is no longer used by us but isn't

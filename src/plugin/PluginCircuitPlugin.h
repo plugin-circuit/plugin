@@ -11,6 +11,7 @@
 #include "core/Catalog.h"
 #include "core/InnerHost.h"
 #include "core/PackageCache.h"
+#include "core/ParamTable.h"
 #include "plugin/Macros.h"
 #include "plugin/StateCodec.h"
 
@@ -26,6 +27,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <unordered_map>
 
 namespace plugincircuit {
 
@@ -80,6 +82,9 @@ private:
 		std::unique_ptr<InnerPlugin> inner;
 		CatalogPlugin meta;
 		PackageCache::InUse inUse; // the package can't be deleted while it's loaded
+		// The parameter table (core/ParamTable.h): published here, read on the audio thread through this pointer.
+		std::atomic<ParamTable *> params{nullptr};
+		std::unique_ptr<ParamTable> ownedParams;
 		std::atomic<bool> started{false}; // inner start_processing done (audio thread)
 	};
 	enum class Status { Empty, Fetching, Downloading, Compiling, Ready, Missing, Error };
@@ -184,6 +189,27 @@ private:
 	std::atomic<MacroMap *> macros_{nullptr};
 	std::unique_ptr<MacroMap> ownedMacros_;
 	std::vector<std::pair<uint64_t, std::unique_ptr<MacroMap>>> retiredMacros_;
+	std::vector<std::pair<uint64_t, std::unique_ptr<ParamTable>>> retiredTables_;
+
+	// ---- parameters (docs/MESSAGING.md: the table is the single source of truth) ----
+public:
+	ParamTable *paramTable() const { return current_ ? current_->params.load(std::memory_order_acquire) : nullptr; } // main thread
+	std::string paramTextCached(clap_id id, double value); // main thread: value_to_text, cached per (id, value)
+	void reconcileParams(size_t count); // main thread: the safety net, re-reads `count` values round-robin
+
+private:
+	void buildParamTable(Slot &slot);                        // main thread: (re)build from the plugin, then publish
+	void refreshParamValues(ParamTable &table, InnerPlugin &inner); // main thread: get_value for every parameter
+	struct TextKey {
+		clap_id id;
+		uint64_t bits;
+		bool operator==(const TextKey &o) const { return id == o.id && bits == o.bits; }
+	};
+	struct TextKeyHash {
+		size_t operator()(const TextKey &k) const { return std::hash<uint64_t>()(k.bits * 0x9E3779B97F4A7C15ull ^ k.id); }
+	};
+	std::unordered_map<TextKey, std::string, TextKeyHash> textCache_;
+	size_t reconcileNext_ = 0;
 	std::array<std::atomic<double>, kNumMacros> macroValues_{};
 	std::atomic<uint64_t> processEpoch_{0};
 	// Hosts without a transport (clap-wrapper's standalone passes none): our own 120 bpm 4/4 transport, started

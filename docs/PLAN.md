@@ -35,6 +35,22 @@ chosen in `activate()`). Test: unit-level, the callback fires.
 
 ## Phase 1: the parameter table — the single source of truth — L
 
+Status: done (1.1 to 1.4). Measured with Six Sines (2,591 parameters), main-thread calls into the plugin's params
+extension (`PLUGINCIRCUIT_DEBUG_CALLS`):
+
+| | before | after |
+| --- | --- | --- |
+| calls per second, plugin view, idle | ~7,800 (`get_info` + `get_value` + `value_to_text`, 2,591 each) | 0 |
+| calls per second, Params view, idle | same | 64 `get_value` (the safety net) |
+| building one UI update | 0.9-1.3 s (so 1 update a second instead of 20) | 0.0 ms; once after a load: 620 ms (every text formatted once, then cached) |
+| a parameter changed from the UI | a full rebuild | 1 `value_to_text` |
+
+Helm (139 parameters) went from ~7,900 calls per second to 0. Tests: `tests/param_table_test.cpp` (including a
+concurrent writer and reader: no change lost); the end-to-end check (a UI edit shows the plugin's own text) runs in
+the editor harness, whose host now flushes like a DAW that isn't processing.
+
+Left for later: the 620 ms after a load could go by formatting texts only for the parameters the page shows.
+
 **1.1 `src/core/ParamTable.h/.cpp`.** One table per loaded slot: the WCLAP's parameters plus the 64 macros.
 - Per parameter: `info` (cached `get_info`), `std::atomic<double> value`, `std::atomic<uint8_t> owner`
   (none / UI / plugin), a bit in a preallocated `changed` bitset (`std::atomic<uint64_t>` words).

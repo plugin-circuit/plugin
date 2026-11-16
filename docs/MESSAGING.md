@@ -50,9 +50,9 @@ Values that change without an event (a WCLAP that loads a preset internally and 
 it happens) would make the table drift. Safety net instead of polling: while the Params view is open, re-read the
 values of the visible parameters with `get_value` at 1 Hz, a few at a time, and treat a difference as a change.
 
-Today: the editor calls `get_value` and `value_to_text` for every parameter every 50 ms, and `count`/`get_info` for
-every parameter on every structural update. Each is a call into the WebAssembly; for a single-threaded WCLAP (23 of
-the 24 catalog plugins) each one also takes the lock the audio thread needs.
+Implemented (`src/core/ParamTable.h`; numbers in `PLAN.md`, phase 1). Before, the editor called `count`, `get_info`,
+`get_value` and `value_to_text` for every parameter on every update; each was a call into the WebAssembly and, for a
+single-threaded WCLAP (23 of the 24 catalog plugins), took the lock the audio thread needs.
 
 ## Gestures and ownership
 

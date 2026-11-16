@@ -2,6 +2,7 @@
 
 #include "gui/Editor.h"
 
+#include <bit>
 #include <chrono>
 #include <algorithm>
 #include <cmath>
@@ -232,6 +233,11 @@ void PluginCircuitPlugin::passThrough(const clap_process *p) {
 void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slot, const MacroMap *map, bool drainUi,
                                           bool drainNotes) {
 	innerIn_.clear();
+	// every value applied to the plugin is also the table's (the single source of truth); no table: nothing loaded
+	ParamTable *table = slot ? slot->params.load(std::memory_order_acquire) : nullptr;
+	auto record = [table](clap_id id, double v) {
+		if (table) table->setById(id, v);
+	};
 	// UI-originated events first: they are stamped at time 0, so the list stays sorted
 	UiEvent ui;
 	while (drainUi && uiEvents_.pop(ui)) {
@@ -241,6 +247,7 @@ void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slo
 				for (auto &t : map->macros[ui.id].targets) {
 					clap_event_param_value e{{sizeof(e), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, t.paramId, nullptr, -1, -1, -1, -1, t.map(ui.value)};
 					innerIn_.push(&e.header);
+					record(t.paramId, e.value);
 				}
 			if (outerOut_) { // tell the DAW so automation records UI moves
 				clap_event_param_value e{{sizeof(e), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, ui.id, nullptr, -1, -1, -1, -1, ui.value};
@@ -253,6 +260,7 @@ void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slo
 		} else if (ui.kind == UiEvent::Param) {
 			clap_event_param_value e{{sizeof(e), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, ui.id, nullptr, -1, -1, -1, -1, ui.value};
 			innerIn_.push(&e.header);
+			record(ui.id, ui.value);
 			if (map) {
 				int s = map->slotForParam(ui.id);
 				if (s >= 0) {
@@ -284,6 +292,7 @@ void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slo
 			for (auto &t : map->macros[e->param_id].targets) {
 				clap_event_param_value ie{{sizeof(ie), h->time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, t.paramId, nullptr, -1, -1, -1, -1, t.map(e->value)};
 				innerIn_.push(&ie.header);
+				record(t.paramId, ie.value);
 			}
 		} else if (h->type == CLAP_EVENT_PARAM_MOD || h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN || h->type == CLAP_EVENT_PARAM_GESTURE_END) {
 			continue; // macros aren't modulatable yet; gestures are host-side only
@@ -300,6 +309,10 @@ bool PluginCircuitPlugin::innerOutTryPush(const clap_output_events *list, const 
 	auto *map = self->macros_.load(std::memory_order_acquire);
 	if (h->type == CLAP_EVENT_PARAM_VALUE) {
 		auto *e = reinterpret_cast<const clap_event_param_value *>(h);
+		// the plugin changed it (its own GUI, its DSP): the table follows. current_ is stable here: called from
+		// inside its process (innerLock_ held) or from params.flush on the main thread.
+		if (auto *slot = self->current_)
+			if (auto *table = slot->params.load(std::memory_order_acquire)) table->setById(e->param_id, e->value);
 		int s = map ? map->slotForParam(e->param_id) : -1;
 		if (s >= 0) {
 			double n = map->macros[s].targets[0].unmap(e->value);
@@ -492,7 +505,7 @@ bool PluginCircuitPlugin::paramsValueToText(clap_id id, double value, char *disp
 	auto *map = macros_.load(std::memory_order_acquire);
 	auto &m = map->macros[id];
 	if (m.targets.size() == 1 && current_) {
-		auto text = current_->inner->paramText(m.targets[0].paramId, m.targets[0].map(value));
+		auto text = const_cast<PluginCircuitPlugin *>(this)->paramTextCached(m.targets[0].paramId, m.targets[0].map(value));
 		std::snprintf(display, size, "%s", text.c_str());
 		return true;
 	}
@@ -554,10 +567,9 @@ bool PluginCircuitPlugin::stateSave(const clap_ostream *stream) {
 			s.moduleSha256 = meta.moduleSha256;
 			current_->inner->saveState(s.innerState);
 			PackageCache::markSaved(meta.sha256); // the package is in a DAW session now
-			for (auto &p : current_->inner->params()) {
-				double v;
-				if (p.automatable() && current_->inner->paramValue(p.id, v)) s.innerParams[p.id] = v;
-			}
+			if (auto *table = current_->params.load(std::memory_order_acquire))
+				for (size_t i = 0; i < table->size(); ++i)
+					if (table->info(i).automatable()) s.innerParams[table->info(i).id] = table->value(i);
 		}
 		s.macros = *macros_.load();
 		for (uint32_t i = 0; i < kNumMacros; ++i) s.macroValues[i] = macroValues_[i].load();
@@ -598,6 +610,7 @@ bool PluginCircuitPlugin::stateLoad(const clap_istream *stream) {
 	// same plugin already loaded: apply in place
 	if (current_ && current_->inner->pluginId() == state->pluginId && current_->meta.moduleSha256 == state->moduleSha256) {
 		applyHostState(*current_->inner, *state);
+		if (auto *table = paramTable()) refreshParamValues(*table, *current_->inner); // the state changed them
 		return true;
 	}
 	LoadJob job;
@@ -720,9 +733,16 @@ InnerHostCallbacks PluginCircuitPlugin::makeInnerCallbacks() {
 	cb.requestRestart = [this] { host_->request_restart(host_); };
 	cb.requestProcess = [this] { host_->request_process(host_); };
 	cb.paramsRescan = [this](clap_param_rescan_flags flags) {
-		// called on the main thread by the inner plugin
-		if (auto *map = macros_.load(); map && map->autoMapped && (flags & CLAP_PARAM_RESCAN_ALL) && current_) {
-			publishMacros(MacroMap::autoMap(current_->inner->params()));
+		// called on the main thread by the inner plugin: the table follows (info: a new table; values: re-read)
+		if (current_) {
+			if (flags & (CLAP_PARAM_RESCAN_ALL | CLAP_PARAM_RESCAN_INFO)) buildParamTable(*current_);
+			else if (flags & CLAP_PARAM_RESCAN_VALUES) {
+				if (auto *table = paramTable()) refreshParamValues(*table, *current_->inner);
+			}
+			if (flags & (CLAP_PARAM_RESCAN_ALL | CLAP_PARAM_RESCAN_TEXT | CLAP_PARAM_RESCAN_INFO)) textCache_.clear();
+		}
+		if (auto *map = macros_.load(); map && map->autoMapped && (flags & CLAP_PARAM_RESCAN_ALL) && current_ && paramTable()) {
+			publishMacros(MacroMap::autoMap(paramTable()->infos()));
 			if (hostParams_) hostParams_->rescan(host_, CLAP_PARAM_RESCAN_INFO | CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_TEXT);
 		} else if (hostParams_ && (flags & (CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_TEXT))) {
 			hostParams_->rescan(host_, CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_TEXT);
@@ -774,15 +794,18 @@ void PluginCircuitPlugin::finishLoad(std::unique_ptr<LoadJob> job) {
 	slot->inUse = std::move(job->inUse);
 	slot->inner = std::move(inner);
 
+	buildParamTable(*slot); // the plugin's parameters, read once
+	auto *table = slot->params.load(std::memory_order_relaxed);
 	if (job->state) {
 		applyHostState(*slot->inner, *job->state);
+		refreshParamValues(*table, *slot->inner); // the state changed them
 	} else {
-		auto map = MacroMap::autoMap(slot->inner->params());
+		auto map = MacroMap::autoMap(table->infos());
 		for (uint32_t i = 0; i < kNumMacros; ++i) {
 			double v = map.macros[i].defaultValue;
 			if (map.macros[i].targets.size() == 1) {
 				double cur;
-				if (slot->inner->paramValue(map.macros[i].targets[0].paramId, cur)) v = map.macros[i].targets[0].unmap(cur);
+				if (table->valueById(map.macros[i].targets[0].paramId, cur)) v = map.macros[i].targets[0].unmap(cur);
 			}
 			macroValues_[i].store(v);
 		}
@@ -857,6 +880,10 @@ void PluginCircuitPlugin::housekeeping() {
 	}
 	// free macro maps the audio thread can no longer be reading (two blocks later, or when idle)
 	auto epoch = processEpoch_.load(std::memory_order_acquire);
+	for (auto it = retiredTables_.begin(); it != retiredTables_.end();) {
+		if (audioIdle || epoch > it->first + 1) it = retiredTables_.erase(it);
+		else ++it;
+	}
 	for (auto it = retiredMacros_.begin(); it != retiredMacros_.end();) {
 		if (audioIdle || epoch > it->first + 1) it = retiredMacros_.erase(it);
 		else ++it;
@@ -949,10 +976,10 @@ void PluginCircuitPlugin::uiMapMacro(uint32_t slot, clap_id paramId, double minV
 	auto &m = map.macros[slot];
 	bool stepped = false;
 	std::string name;
-	for (auto &p : current_->inner->params())
-		if (p.id == paramId) {
-			stepped = p.stepped();
-			name = p.name;
+	if (auto *table = paramTable())
+		if (const int i = table->indexOf(paramId); i >= 0) {
+			stepped = table->info(size_t(i)).stepped();
+			name = table->info(size_t(i)).name;
 		}
 	if (!add) m.targets.clear();
 	m.targets.erase(std::remove_if(m.targets.begin(), m.targets.end(), [&](auto &t) { return t.paramId == paramId; }), m.targets.end());
@@ -994,12 +1021,13 @@ void PluginCircuitPlugin::uiSetTransport(bool playing) {
 }
 
 void PluginCircuitPlugin::uiAutoMap() {
-	if (!current_) return;
-	publishMacros(MacroMap::autoMap(current_->inner->params()));
+	auto *table = paramTable();
+	if (!current_ || !table) return;
+	publishMacros(MacroMap::autoMap(table->infos()));
 	auto *map = macros_.load();
 	for (uint32_t i = 0; i < kNumMacros; ++i) {
 		double v = map->macros[i].defaultValue, cur;
-		if (map->macros[i].targets.size() == 1 && current_->inner->paramValue(map->macros[i].targets[0].paramId, cur))
+		if (map->macros[i].targets.size() == 1 && table->valueById(map->macros[i].targets[0].paramId, cur))
 			v = map->macros[i].targets[0].unmap(cur);
 		macroValues_[i].store(v);
 	}
@@ -1032,13 +1060,23 @@ choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 	snap.addMember("macroValues", values);
 
 	auto *inner = innerForGui();
+	auto *table = paramTable();
+	static const std::vector<ParamInfo> noParams;
+	const auto &params = table ? table->infos() : noParams;
+	// values from the table, never from the plugin: all on a full snapshot (the page rebuilds), else only changed ones
 	auto paramValues = choc::value::createEmptyArray();
-	std::vector<ParamInfo> params;
-	if (inner) params = inner->params();
-	for (auto &p : params) {
-		double v = p.defaultValue;
-		inner->paramValue(p.id, v);
-		paramValues.addArrayElement(choc::value::createObject("PV", "id", (int64_t)p.id, "value", v, "text", inner->paramText(p.id, v)));
+	if (table) {
+		auto add = [&](size_t i) {
+			const double v = table->value(i);
+			paramValues.addArrayElement(choc::value::createObject("PV", "id", (int64_t)table->info(i).id, "value", v, "text",
+			                                                      paramTextCached(table->info(i).id, v)));
+		};
+		if (full) {
+			table->takeChanged([](size_t) {});
+			for (size_t i = 0; i < table->size(); ++i) add(i);
+		} else {
+			table->takeChanged(add);
+		}
 	}
 	snap.addMember("paramValues", paramValues);
 	if (!full) return snap;
@@ -1075,6 +1113,48 @@ choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 			installed.addArrayElement(choc::value::createObject("I", "id", p.id, "name", p.name, "vendor", p.vendor, "type", p.type, "sha256", p.sha256));
 	snap.addMember("installed", installed);
 	return snap;
+}
+
+
+// ---- the parameter table ---------------------------------------------------------------------------------
+void PluginCircuitPlugin::refreshParamValues(ParamTable &table, InnerPlugin &inner) {
+	for (size_t i = 0; i < table.size(); ++i) {
+		double v;
+		if (inner.paramValue(table.info(i).id, v)) table.set(i, v);
+	}
+}
+
+void PluginCircuitPlugin::buildParamTable(Slot &slot) {
+	auto next = std::make_unique<ParamTable>(slot.inner->params());
+	refreshParamValues(*next, *slot.inner);
+	next->markAllChanged();
+	auto *prev = slot.params.exchange(next.get(), std::memory_order_acq_rel);
+	(void)prev; // the audio thread may still be reading it: retired below, freed after its next block
+	if (slot.ownedParams) retiredTables_.emplace_back(processEpoch_.load(std::memory_order_acquire), std::move(slot.ownedParams));
+	slot.ownedParams = std::move(next);
+	textCache_.clear();
+	stateVersion_++;
+}
+
+std::string PluginCircuitPlugin::paramTextCached(clap_id id, double value) {
+	const TextKey key{id, std::bit_cast<uint64_t>(value)};
+	if (auto it = textCache_.find(key); it != textCache_.end()) return it->second;
+	auto *inner = innerForGui();
+	std::string text = inner ? inner->paramText(id, value) : std::string();
+	if (textCache_.size() >= 8192) textCache_.clear(); // bounded: values seen recently come back quickly
+	textCache_.emplace(key, text);
+	return text;
+}
+
+void PluginCircuitPlugin::reconcileParams(size_t count) {
+	auto *table = paramTable();
+	if (!table || !current_ || table->size() == 0) return;
+	for (size_t n = 0; n < std::min(count, table->size()); ++n) {
+		if (reconcileNext_ >= table->size()) reconcileNext_ = 0;
+		const size_t i = reconcileNext_++;
+		double v;
+		if (current_->inner->paramValue(table->info(i).id, v)) table->set(i, v); // marks it changed if the plugin moved it
+	}
 }
 
 } // namespace plugincircuit

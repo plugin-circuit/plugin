@@ -332,6 +332,8 @@ std::vector<ParamInfo> InnerPlugin::params() const {
 	std::vector<ParamInfo> out;
 	if (!params_) return out;
 	auto count = params_->count(plugin_);
+	paramCalls.count.fetch_add(1, std::memory_order_relaxed);
+	paramCalls.info.fetch_add(count, std::memory_order_relaxed);
 	for (uint32_t i = 0; i < count; ++i) {
 		clap_param_info info{};
 		if (!params_->get_info(plugin_, i, &info)) continue;
@@ -349,11 +351,13 @@ std::vector<ParamInfo> InnerPlugin::params() const {
 }
 
 bool InnerPlugin::paramValue(clap_id id, double &value) const {
+	paramCalls.value.fetch_add(1, std::memory_order_relaxed);
 	return params_ && params_->get_value(plugin_, id, &value);
 }
 
 std::string InnerPlugin::paramText(clap_id id, double value) const {
 	char buf[256] = {0};
+	paramCalls.text.fetch_add(1, std::memory_order_relaxed);
 	if (params_ && params_->value_to_text(plugin_, id, value, buf, sizeof(buf))) return buf;
 	char num[64];
 	std::snprintf(num, sizeof(num), "%.3g", value);

@@ -59,7 +59,24 @@ const clap_host_gui hostGui{
 const clap_host_thread_check threadCheck{[](const clap_host *) { return bool([NSThread isMainThread]); },
                                          [](const clap_host *) { return false; }};
 
+// params: a DAW that isn't processing flushes when the plugin asks (how UI edits get applied without audio)
+const clap_host_params hostParams{
+	[](const clap_host *, clap_param_rescan_flags) {},
+	[](const clap_host *, clap_id, clap_param_clear_flags) {},
+	[](const clap_host *) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if (!plugin) return;
+			auto *params = (const clap_plugin_params *)plugin->get_extension(plugin, CLAP_EXT_PARAMS);
+			static const clap_input_events none{nullptr, [](const clap_input_events *) -> uint32_t { return 0; },
+			                                    [](const clap_input_events *, uint32_t) -> const clap_event_header * { return nullptr; }};
+			static const clap_output_events sink{nullptr, [](const clap_output_events *, const clap_event_header *) { return true; }};
+			if (params && params->flush) params->flush(plugin, &none, &sink);
+		});
+	},
+};
+
 const void *getExt(const clap_host *, const char *id) {
+	if (!std::strcmp(id, CLAP_EXT_PARAMS)) return &hostParams;
 	if (!std::strcmp(id, CLAP_EXT_GUI)) return &hostGui;
 	if (!std::strcmp(id, CLAP_EXT_THREAD_CHECK)) return &threadCheck;
 	return nullptr;
@@ -145,7 +162,8 @@ int main(int argc, char **argv) {
 
 	// the editor's debug hooks drive the page: load the inner plugin, then toggle the keyboard and switch views
 	if (withInner) setenv("PLUGINCIRCUIT_AUTOLOAD", argv[3], 1);
-	setenv("PLUGINCIRCUIT_UI_JS",
+	if (!std::getenv("PLUGINCIRCUIT_UI_JS")) // a caller's own script wins (e.g. a functional check)
+		setenv("PLUGINCIRCUIT_UI_JS",
 	       "(async () => { const s = (ms) => new Promise((r) => setTimeout(r, ms));"
 	       " const kb = () => document.getElementById('kbdToggle').click();"
 	       " const tab = (v) => { const b = document.querySelector('.tabs button[data-view=' + v + ']'); if (b) b.click(); };"

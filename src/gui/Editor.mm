@@ -18,6 +18,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <string_view>
@@ -274,7 +275,15 @@ struct Editor::Impl {
 	// --- web UI --------------------------------------------------------------------------------------------
 	void push(bool full) {
 		if (!web || !pageReady) return;
+		const auto snapT0 = std::chrono::steady_clock::now();
 		auto snap = plugin.uiSnapshot(full);
+		if (static const bool dbg = std::getenv("PLUGINCIRCUIT_DEBUG_CALLS") != nullptr; dbg) {
+			static double worst = 0, sum = 0;
+			static int n = 0;
+			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - snapT0).count();
+			worst = std::max(worst, ms), sum += ms, ++n;
+			if (n % 10 == 0) std::fprintf(stderr, "[plugincircuit snapshot] last %.1f ms, avg %.1f ms, worst %.1f ms (%s)\n", ms, sum / n, worst, full ? "full" : "values");
+		}
 		snap.addMember("view", view);
 		snap.addMember("innerGui", innerGuiCreated);
 		snap.addMember("keyboard", keyboardHeight > 0);
@@ -357,7 +366,39 @@ struct Editor::Impl {
 		fitToInner();
 	}
 
+	// PLUGINCIRCUIT_DEBUG_CALLS: once a second, the main-thread calls into the plugin's parameters (docs/PLAN.md phase 1)
+	std::chrono::steady_clock::time_point callsAt{};
+	uint64_t callsLast[4] = {0, 0, 0, 0};
+	void debugCalls() {
+		static const bool on = std::getenv("PLUGINCIRCUIT_DEBUG_CALLS") != nullptr;
+		auto *inner = plugin.innerForGui();
+		if (!on || !inner) return;
+		const auto now = std::chrono::steady_clock::now();
+		if (now - callsAt < std::chrono::seconds(1)) return;
+		auto &c = inner->paramCalls;
+		const uint64_t cur[4] = {c.count.load(), c.info.load(), c.value.load(), c.text.load()};
+		if (callsAt != std::chrono::steady_clock::time_point{})
+			std::fprintf(stderr, "[plugincircuit calls/s] count %llu, get_info %llu, get_value %llu, value_to_text %llu, view %s\n",
+			             (unsigned long long)(cur[0] - callsLast[0]), (unsigned long long)(cur[1] - callsLast[1]),
+			             (unsigned long long)(cur[2] - callsLast[2]), (unsigned long long)(cur[3] - callsLast[3]), view.c_str());
+		std::copy(cur, cur + 4, callsLast);
+		callsAt = now;
+	}
+
+	// The table's safety net: a plugin that changes a parameter without reporting it. Only while the Params view shows
+	// values; 64 re-reads a second, round-robin.
+	std::chrono::steady_clock::time_point reconcileAt{};
+	void reconcile() {
+		if (view != "params") return;
+		const auto now = std::chrono::steady_clock::now();
+		if (now - reconcileAt < std::chrono::seconds(1)) return;
+		reconcileAt = now;
+		plugin.reconcileParams(64);
+	}
+
 	void tick() {
+		debugCalls();
+		reconcile();
 		if (uint64_t s = pendingInnerSize.exchange(0)) applyInnerSize(uint32_t(s >> 32), uint32_t(s));
 		if (uint64_t s = plugin.pendingInnerResize.exchange(0, std::memory_order_acquire)) applyInnerSize(uint32_t(s >> 32), uint32_t(s));
 		debugHooks();
@@ -444,8 +485,7 @@ struct Editor::Impl {
 		} else if (method == "cacheClearCompiled") {
 			PackageCache::clearCompiled();
 		} else if (method == "paramText") { // the plugin's own text for a value (value_to_text), e.g. while dragging
-			auto *inner = plugin.innerForGui();
-			return choc::value::Value(inner ? inner->paramText((clap_id)num("id"), num("value")) : std::string());
+			return choc::value::Value(plugin.paramTextCached((clap_id)num("id"), num("value")));
 		} else if (method == "mapMacro") {
 			plugin.uiMapMacro((uint32_t)num("slot"), (clap_id)num("paramId"), num("min"), num("max", 1), num("add") != 0);
 		} else if (method == "unmapMacro") {

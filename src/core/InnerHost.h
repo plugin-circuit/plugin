@@ -62,6 +62,12 @@ public:
 	bool ownsTimer(clap_id timerId) const;
 
 	std::vector<ParamInfo> params() const;
+	// Main-thread calls into the plugin's params extension, counted (each is a call into the WebAssembly, and for a
+	// single-threaded WCLAP takes the lock the audio thread needs): count, get_info, get_value, value_to_text.
+	struct ParamCalls {
+		std::atomic<uint64_t> count{0}, info{0}, value{0}, text{0};
+	};
+	mutable ParamCalls paramCalls;
 	bool paramValue(clap_id id, double &value) const;
 	std::string paramText(clap_id id, double value) const;
 	// Main-thread param flush (when not processing). Events must be sorted by time.

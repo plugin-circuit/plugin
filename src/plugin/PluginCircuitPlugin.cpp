@@ -1078,7 +1078,7 @@ choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 					paramValues.addArrayElement(choc::value::createObject("PV", "id", (int64_t)id, "value", v, "text", paramTextCached(id, v)));
 					return;
 				}
-				pendingTexts_.push_back(id); // out of time: next update
+				queueText(id); // out of time: next update
 			}
 			paramValues.addArrayElement(choc::value::createObject("PV", "id", (int64_t)id, "value", v)); // keeps its last text
 		};
@@ -1191,8 +1191,13 @@ bool PluginCircuitPlugin::wantsText(clap_id id) const {
 void PluginCircuitPlugin::setVisibleParams(std::vector<clap_id> ids) {
 	std::sort(ids.begin(), ids.end());
 	for (auto id : ids) // newly visible: a fresh text on the next update (the page kept a possibly stale one)
-		if (!std::binary_search(visibleParams_.begin(), visibleParams_.end(), id)) pendingTexts_.push_back(id);
+		if (!std::binary_search(visibleParams_.begin(), visibleParams_.end(), id)) queueText(id);
 	visibleParams_ = std::move(ids);
+}
+
+// once per id: the queue stays bounded by what is visible (plus macro targets), however often values change
+void PluginCircuitPlugin::queueText(clap_id id) {
+	if (std::find(pendingTexts_.begin(), pendingTexts_.end(), id) == pendingTexts_.end()) pendingTexts_.push_back(id);
 }
 
 } // namespace plugincircuit

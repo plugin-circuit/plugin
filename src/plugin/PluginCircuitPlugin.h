@@ -216,6 +216,7 @@ private:
 	std::vector<clap_id> visibleParams_;  // sorted
 	std::vector<clap_id> pendingTexts_;   // visible parameters still owed a text (formatting is time-budgeted)
 	bool wantsText(clap_id id) const;
+	void queueText(clap_id id);
 	std::array<std::atomic<double>, kNumMacros> macroValues_{};
 	std::atomic<uint64_t> processEpoch_{0};
 	// Hosts without a transport (clap-wrapper's standalone passes none): our own 120 bpm 4/4 transport, started

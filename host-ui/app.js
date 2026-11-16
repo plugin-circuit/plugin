@@ -37,10 +37,11 @@ window.plugincircuitHost = {
       hostTransport: s.hostTransport, transportPlaying: s.transportPlaying });
     s.macroValues.forEach((v, i) => { if (!state.dragging.has("m" + i)) state.values[i] = v; });
     // while a param is dragged its value is ours, but its text is always the plugin's
-    // texts come only for parameters the page shows (phase 1b): a value without one keeps the row's last text
+    // texts come only for parameters the page shows (phase 1b): a value without one keeps the row's last text if the
+    // value is the same, else none (the core sends it when the row comes into view)
     for (const pv of s.paramValues) {
       const cur = state.paramValues.get(pv.id);
-      if (pv.text === undefined) pv.text = cur ? cur.text : "";
+      if (pv.text === undefined) pv.text = cur && cur.value === pv.value ? cur.text : "";
       if (!state.dragging.has("p" + pv.id) || !cur) state.paramValues.set(pv.id, pv);
       else if (cur.value === pv.value) cur.text = pv.text;
     }

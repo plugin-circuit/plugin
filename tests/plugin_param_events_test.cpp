@@ -15,6 +15,7 @@
 
 #include <clap/clap.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -43,7 +44,7 @@ int failures = 0;
 	} while (0)
 
 thread_local bool tlsAudio = false;
-bool callbackRequested = false;
+std::atomic<bool> callbackRequested{false}; // set by the plugin's loader thread
 
 const clap_host_thread_check threadCheck{[](const clap_host *) { return !tlsAudio; }, [](const clap_host *) { return tlsAudio; }};
 const clap_host_params hostParams{[](const clap_host *, clap_param_rescan_flags) {},
@@ -172,10 +173,7 @@ int main(int argc, char **argv) {
 	bool loaded = false;
 	for (int i = 0; i < 1000 && !loaded; ++i) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		if (callbackRequested) {
-			callbackRequested = false;
-			p->on_main_thread(p);
-		}
+		if (callbackRequested.exchange(false)) p->on_main_thread(p);
 		clap_param_info info{};
 		loaded = params->get_info(p, 0, &info) && std::string(info.name) == "Level";
 	}

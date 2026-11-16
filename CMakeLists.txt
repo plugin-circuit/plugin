@@ -37,13 +37,11 @@ endif()
 
 # --- wclap-bridge (Wasmtime-based WCLAP -> native CLAP) -------------------------------
 FetchContent_Declare(wclap-bridge
-	GIT_REPOSITORY https://github.com/WebCLAP/wclap-bridge
-	GIT_TAG cd11d22afbe2af350f24cd56e6e0536e5ca86452
+	# Our fork: upstream WebCLAP/wclap-bridge plus our fixes, one commit each, on the plugin-circuit branch (its
+	# webview-gui submodule points at our webview-gui fork). See docs/UPSTREAM.md.
+	GIT_REPOSITORY https://github.com/plugin-circuit/wclap-bridge
+	GIT_TAG 6f6e08df613d3b1d83bcadd40bf456301f6cebed
 	GIT_SUBMODULES_RECURSE ON
-	# fixes: init the WCLAP before querying its extensions; enable the wasm exceptions proposal
-	# webview-gui is a submodule, so its fix is a patch of its own, applied inside it. Each apply is skipped when the
-	# patch is already in (a re-configure).
-	PATCH_COMMAND sh -c "(git apply --reverse --check ${CMAKE_CURRENT_SOURCE_DIR}/patches/wclap-bridge.patch 2>/dev/null || git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/wclap-bridge.patch) && cd modules/webview-gui && (git apply --reverse --check ${CMAKE_CURRENT_SOURCE_DIR}/patches/webview-gui.patch 2>/dev/null || git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/webview-gui.patch)"
 	UPDATE_DISCONNECTED ON
 	SOURCE_SUBDIR do-not-add) # added manually below, after clap-wrapper
 FetchContent_MakeAvailable(wclap-bridge)
@@ -86,6 +84,8 @@ add_library(plugincircuit-core STATIC
 	src/core/Archive.cpp
 	src/core/Http.cpp
 	src/core/Catalog.cpp
+	src/core/PackageCache.cpp
+	src/core/Settings.cpp
 	src/core/Paths.cpp
 	src/core/WclapLibrary.cpp
 	src/core/InnerHost.cpp)
@@ -115,6 +115,9 @@ if (APPLE)
 	set_source_files_properties(src/gui/Editor.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 endif()
 
+# clap-wrapper v0.12.1 reads a misspelled C1ST_BUNDLE_IDENTIFER for the VST3 and AUv2 bundle ids (make_clapfirst.cmake),
+# so they'd be ".vst3" / ".auv2". Set it until that's fixed upstream (docs/UPSTREAM.md).
+set(C1ST_BUNDLE_IDENTIFER "studio.plugincircuit.host")
 make_clapfirst_plugins(
 	TARGET_NAME PluginCircuit
 	IMPL_TARGET plugincircuit-impl
@@ -138,6 +141,38 @@ if (PLUGINCIRCUIT_BUILD_PLUGIN)
 	target_include_directories(plugincircuit-state-test PRIVATE ${wclap-bridge_SOURCE_DIR}/modules/clap/include)
 	add_executable(plugincircuit-latency-test tools/latency_test.cpp)
 	target_include_directories(plugincircuit-latency-test PRIVATE ${wclap-bridge_SOURCE_DIR}/modules/clap/include)
+endif()
+
+# --- tests (ctest) -------------------------------------------------------------------------------
+enable_testing()
+add_executable(plugincircuit-editor-layout-test tests/editor_layout_test.cpp)
+target_include_directories(plugincircuit-editor-layout-test PRIVATE src)
+add_test(NAME editor-layout COMMAND plugincircuit-editor-layout-test)
+add_executable(plugincircuit-dropout-concealer-test tests/dropout_concealer_test.cpp)
+target_include_directories(plugincircuit-dropout-concealer-test PRIVATE ${wclap-bridge_SOURCE_DIR}/source)
+add_test(NAME dropout-concealer COMMAND plugincircuit-dropout-concealer-test)
+add_executable(plugincircuit-main-thread-block-test tests/main_thread_block_test.cpp)
+target_link_libraries(plugincircuit-main-thread-block-test PRIVATE plugincircuit-core)
+# A single-threaded WCLAP whose webview message does long work (Spiral303's Export WAV renders offline): the audio
+# thread must not wait for it. Set to "<bundle-dir>;<pluginId>" to run it.
+set(PLUGINCIRCUIT_TEST_BLOCKING_WCLAP "" CACHE STRING "Bundle dir;plugin id;webview message for the main-thread block test")
+if (PLUGINCIRCUIT_TEST_BLOCKING_WCLAP)
+	add_test(NAME main-thread-block COMMAND plugincircuit-main-thread-block-test ${PLUGINCIRCUIT_TEST_BLOCKING_WCLAP} export --count 3)
+endif()
+if (PLUGINCIRCUIT_BUILD_PLUGIN AND APPLE)
+	# opens real windows: needs a logged-in GUI session (label "gui")
+	add_executable(plugincircuit-editor-resize-test tests/editor_resize_test.mm)
+	target_include_directories(plugincircuit-editor-resize-test PRIVATE ${wclap-bridge_SOURCE_DIR}/modules/clap/include)
+	target_link_libraries(plugincircuit-editor-resize-test PRIVATE "-framework Cocoa" "-framework WebKit")
+	set_source_files_properties(tests/editor_resize_test.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+	add_dependencies(plugincircuit-editor-resize-test PluginCircuit_clap)
+	# a catalog WCLAP with a GUI to exercise the hosted GUI too (needs it cached or the API running)
+	set(PLUGINCIRCUIT_TEST_INNER_PLUGIN "" CACHE STRING "Plugin id for the editor resize test's hosted GUI")
+	foreach (mode wrapper vst3 async refuse)
+		add_test(NAME editor-resize-${mode}
+			COMMAND plugincircuit-editor-resize-test ${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap ${mode} "${PLUGINCIRCUIT_TEST_INNER_PLUGIN}")
+		set_tests_properties(editor-resize-${mode} PROPERTIES LABELS gui RUN_SERIAL TRUE TIMEOUT 60)
+	endforeach()
 endif()
 
 # --- libplugincircuit: the C SDK for third-party hosts (MVP step 3) -----------------------------

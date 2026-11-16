@@ -10,6 +10,7 @@
 //    creating/activating the inner plugin happens back on the main thread.
 #include "core/Catalog.h"
 #include "core/InnerHost.h"
+#include "core/PackageCache.h"
 #include "plugin/Macros.h"
 #include "plugin/StateCodec.h"
 
@@ -53,7 +54,24 @@ public:
 	void uiAutoMap();
 	void uiSetTransport(bool playing); // the fallback transport, used only when the host sends none
 	bool isInstrument() const { return instrument_; }
+	// DSP load, as JUCE's AudioProcessLoadMeasurer: the time a block took over the block's real-time duration. The
+	// audio thread only adds to these (relaxed atomics, no lock); the settings page reads deltas ~10 times a second.
+	struct Performance {
+		std::atomic<uint64_t> blocks{0};
+		std::atomic<uint64_t> overBudget{0};   // blocks slower than real time: the device would have underrun
+		std::atomic<uint64_t> loadPpmSum{0};   // sum of each block's load, in millionths
+		std::atomic<uint32_t> peakPpm{0};      // highest load since the last read (the reader resets it)
+		std::atomic<uint32_t> blockFrames{0};  // the last block's size
+	};
+	Performance performance;
+	// A WCLAP's request_resize from a non-main thread, handed to the editor's main-thread tick: (w << 32 | h), 0 = none.
+	// Kept here, not in the Editor, which the main thread may destroy meanwhile.
+	std::atomic<uint64_t> pendingInnerResize{0};
+	bool isMainThread() const { return std::this_thread::get_id() == mainThreadId_; }
+	double sampleRate() const { return sampleRate_; }
 	InnerPlugin *innerForGui(); // main thread: the current inner plugin, or nullptr
+	std::string currentPackageSha() const { return current_ ? current_->meta.sha256 : std::string(); } // main thread
+	void packagesChanged() { installedAt_ = {}; stateVersion_++; } // main thread: after the settings page deleted some
 	bool requestHostResize(uint32_t w, uint32_t h); // false: the host refused, keep the current size
 	void housekeeping(); // main thread: finish loads, free retired objects
 
@@ -61,6 +79,7 @@ private:
 	struct Slot {
 		std::unique_ptr<InnerPlugin> inner;
 		CatalogPlugin meta;
+		PackageCache::InUse inUse; // the package can't be deleted while it's loaded
 		std::atomic<bool> started{false}; // inner start_processing done (audio thread)
 	};
 	enum class Status { Empty, Fetching, Downloading, Compiling, Ready, Missing, Error };
@@ -71,6 +90,7 @@ private:
 		// results
 		std::shared_ptr<WclapModule> module;
 		CatalogPlugin meta;
+		PackageCache::InUse inUse;
 		std::string error;
 		bool missing = false; // the plugin can't be fetched: keep its state
 	};
@@ -89,7 +109,7 @@ private:
 	bool startProcessing();
 	void stopProcessing();
 	void reset();
-	clap_process_status process(const clap_process *process);
+	clap_process_status process(const clap_process *process); // measures the DSP load around processBlock()
 	const void *getExtension(const char *id);
 	void onMainThread();
 
@@ -137,6 +157,8 @@ private:
 	// audio config
 	bool active_ = false;
 	std::atomic<bool> processing_{false};
+	clap_process_status processBlock(const clap_process *p);
+	std::thread::id mainThreadId_ = std::this_thread::get_id(); // set again in init(), which CLAP calls on the main thread
 	double sampleRate_ = 48000;
 	uint32_t minFrames_ = 1, maxFrames_ = 4096;
 

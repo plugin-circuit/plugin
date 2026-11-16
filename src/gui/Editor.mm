@@ -1,4 +1,9 @@
 #include "gui/Editor.h"
+#include "gui/EditorLayout.h"
+#include "core/PackageCache.h"
+#include "core/Settings.h"
+
+#include <wclap-bridge.h>
 
 #include "plugin/PluginCircuitPlugin.h"
 
@@ -9,6 +14,10 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <memory>
 #include <cstring>
 #include <functional>
 #include <string_view>
@@ -31,21 +40,34 @@ const Resource *find(std::string_view path);
 }
 @end
 
+// The editor's root view: fills the host's parent view (autoresizing) and reports every size change, so the layout
+// always follows the size the host actually gave us, whatever request_resize returned.
+@interface PluginCircuitContainerView : PluginCircuitFlippedView
+@property(nonatomic, copy) void (^onResize)(void);
+@end
+@implementation PluginCircuitContainerView
+- (void)setFrameSize:(NSSize)size {
+	[super setFrameSize:size];
+	if (self.onResize) self.onResize();
+}
+@end
+
 namespace plugincircuit {
 
 struct Editor::Impl {
 	PluginCircuitPlugin &plugin;
-	PluginCircuitFlippedView *container = nil;
+	PluginCircuitContainerView *container = nil;
 	PluginCircuitFlippedView *innerHolder = nil;
 	std::unique_ptr<choc::ui::WebView> web;
 	choc::messageloop::Timer timer;
-	uint32_t width = 1000, height = 680;
+	uint32_t width = 1000, height = 680; // the size we want (get_size); the layout uses the container's real bounds
+	bool inLayout = false;
+	std::atomic<uint64_t> pendingInnerSize{0}; // inner request_resize from another thread: (w << 32 | h), applied in tick()
 	std::string view = "browse"; // plugin | browse | macros | params
 	bool innerGuiCreated = false;
 	uint32_t innerW = 0, innerH = 0;
 	uint32_t keyboardHeight = 0; // on-screen keyboard strip at the bottom (instruments), drawn by the web UI
 	static constexpr uint32_t kKeyboardHeight = 112;
-	static constexpr uint32_t kMinWidth = 640, kMinHeight = 420; // adjustSize's limits
 	uint64_t lastVersion = 0;
 	bool pageReady = false;
 	id keyMonitor = nil; // copies note keys typed into the inner plugin's GUI to the on-screen keyboard
@@ -78,7 +100,56 @@ struct Editor::Impl {
 		win.cocoa = (__bridge void *)innerHolder;
 		gui->set_parent(p, &win);
 		gui->show(p);
+		prepareInnerBackground();
 		fitToInner();
+	}
+
+	// No white flashes: a WKWebView paints white wherever the page hasn't drawn yet (while it re-renders after a
+	// resize or zoom change). Turn that off and fill behind it with the plugin UI's own color instead, sampled
+	// from its rendered edges once it has drawn (and again later, for UIs that load in stages).
+	void prepareInnerBackground() {
+		innerHolder.wantsLayer = YES;
+		innerHolder.layer.backgroundColor = container.layer.backgroundColor;
+		for (NSView *v in innerHolder.subviews) {
+			if (![v isKindOfClass:[WKWebView class]]) continue;
+			WKWebView *wv = (WKWebView *)v;
+			[wv setValue:@NO forKey:@"drawsBackground"]; // the same switch CHOC's transparentBackground uses
+			__weak WKWebView *weakWeb = wv;
+			__weak NSView *weakHolder = innerHolder;
+			for (double delay : {0.6, 2.0, 5.0})
+				dispatch_after(dispatch_time(DISPATCH_TIME_NOW, int64_t(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+					sampleBackground(weakWeb, weakHolder);
+				});
+		}
+	}
+
+	static void sampleBackground(WKWebView *wv, NSView *holder) {
+		if (!wv || !holder || wv.superview != holder) return;
+		[wv takeSnapshotWithConfiguration:nil completionHandler:^(NSImage *image, NSError *) {
+			if (!image) return;
+			NSBitmapImageRep *rep = [NSBitmapImageRep imageRepWithData:[image TIFFRepresentation]];
+			if (!rep || rep.pixelsWide < 4 || rep.pixelsHigh < 4) return;
+			// the most common color along the edges (quantized), averaged within its bucket
+			const NSInteger w = rep.pixelsWide, h = rep.pixelsHigh, step = std::max<NSInteger>(1, (w + h) / 400);
+			struct Acc { double r = 0, g = 0, b = 0; int n = 0; };
+			std::array<Acc, 4096> buckets{};
+			auto add = [&](NSInteger x, NSInteger y) {
+				NSColor *c = [[rep colorAtX:x y:y] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+				if (!c || c.alphaComponent < 0.5) return;
+				const int key = int(c.redComponent * 15.99) << 8 | int(c.greenComponent * 15.99) << 4 | int(c.blueComponent * 15.99);
+				auto &a = buckets[size_t(key)];
+				a.r += c.redComponent, a.g += c.greenComponent, a.b += c.blueComponent, ++a.n;
+			};
+			for (NSInteger x = 0; x < w; x += step) add(x, 1), add(x, h - 2);
+			for (NSInteger y = 0; y < h; y += step) add(1, y), add(w - 2, y);
+			const Acc *best = nullptr;
+			for (auto &a : buckets) if (a.n && (!best || a.n > best->n)) best = &a;
+			if (!best) return;
+			NSColor *bg = [NSColor colorWithSRGBRed:best->r / best->n green:best->g / best->n blue:best->b / best->n alpha:1];
+			if (wv.superview != holder) return;
+			holder.layer.backgroundColor = bg.CGColor;
+			if (@available(macOS 12.0, *)) wv.underPageBackgroundColor = bg;
+		}];
 	}
 
 	void destroyInnerGui() {
@@ -94,57 +165,92 @@ struct Editor::Impl {
 		for (NSView *v in [innerHolder.subviews copy]) [v removeFromSuperview];
 	}
 
+	// The real size of the editor: the container's bounds once the host parented it, else the size we asked for.
+	uint32_t actualW() const { return container && container.superview ? uint32_t(container.bounds.size.width) : width; }
+	uint32_t actualH() const { return container && container.superview ? uint32_t(container.bounds.size.height) : height; }
+
+	// Ask the host for a new size. The return value is not trusted: clap-wrapper's standalone and AUv2 hosts resize
+	// the view and still return false, and other hosts may answer true and resize later. The layout follows the
+	// container's real bounds (onResize), so whatever the host does, nothing is laid out for a size we don't have.
+	void requestSize(uint32_t w, uint32_t h) {
+		const auto want = layout::clampEditor({w, h}, minHeight());
+		width = want.w;
+		height = want.h;
+		if (container && container.superview) {
+			plugin.requestHostResize(width, height);
+			// a synchronous host has resized us by now; keep get_size truthful if it refused
+			width = actualW();
+			height = actualH();
+		}
+		layout();
+	}
+
+	// A fixed-size webview GUI (a WCLAP's WKWebView): we scale it with page zoom, so the editor can take its aspect.
+	bool innerScalable() {
+		if (!innerGuiCreated || innerW == 0 || innerH == 0) return false;
+		auto *inner = plugin.innerForGui();
+		auto *gui = innerGui();
+		if (!inner || !gui || gui->can_resize(inner->plugin())) return false;
+		return [innerHolder.subviews.firstObject isKindOfClass:[WKWebView class]];
+	}
+
+	uint32_t minHeight() const { return innerGuiCreated ? layout::kMinHeightWithGui : layout::kMinHeight; }
+
+	// adjust_size: with an inner GUI the editor keeps to its shape, so the GUI always spans the full width.
+	layout::Size adjust(layout::Size proposed) {
+		const uint32_t chrome = Editor::headerHeight + keyboardHeight;
+		if (innerScalable()) return layout::snapToInner(proposed, {innerW, innerH}, Editor::headerHeight, keyboardHeight);
+		auto *inner = plugin.innerForGui();
+		auto *gui = innerGui();
+		if (innerGuiCreated && inner && gui && gui->can_resize(inner->plugin()) && proposed.h > chrome) {
+			uint32_t w = proposed.w, h = proposed.h - chrome; // the inner GUI picks its closest size for the area
+			if (gui->adjust_size(inner->plugin(), &w, &h)) return layout::clampEditor({w, h + chrome}, minHeight());
+		}
+		return layout::clampEditor(proposed, minHeight());
+	}
+
 	void fitToInner() {
 		if (!innerGuiCreated || innerW == 0 || innerH == 0) return;
-		uint32_t w = std::max<uint32_t>(innerW, 760), h = innerH + Editor::headerHeight + keyboardHeight;
-		if (w != width || h != height) {
-			const uint32_t oldW = width, oldH = height;
-			width = w;
-			height = h;
-			layout();
-			if (!plugin.requestHostResize(w, h)) { // refused: keep the window, the inner GUI is scaled/centred instead
-				width = oldW;
-				height = oldH;
-				layout();
-			}
-		}
+		const auto want = layout::editorForInner({innerW, innerH}, Editor::headerHeight, keyboardHeight, innerScalable());
+		if (want.w != actualW() || want.h != actualH()) requestSize(want.w, want.h);
+		else layout();
 	}
 
 	void layout() {
-		if (!container) return;
-		[container setFrameSize:NSMakeSize(width, height)];
+		if (!container || inLayout) return;
+		inLayout = true;
+		struct Done { bool &f; ~Done() { f = false; } } done{inLayout};
+		if (!container.superview) [container setFrameSize:NSMakeSize(width, height)];
+		const uint32_t width = actualW(), height = actualH(); // lay out what we have, not what we asked for
+		if (std::getenv("PLUGINCIRCUIT_DEBUG_UI") && container.window) std::fprintf(stderr, "[plugincircuit] layout %ux%u, window content %.0fx%.0f, kb %u\n", width, height, container.window.contentView.bounds.size.width, container.window.contentView.bounds.size.height, keyboardHeight);
 		if (web) {
 			NSView *wv = (__bridge NSView *)web->getViewHandle();
 			[wv setFrame:NSMakeRect(0, 0, width, height)];
 		}
-		uint32_t innerAreaH = height > Editor::headerHeight + keyboardHeight ? height - Editor::headerHeight - keyboardHeight : 0;
-		[innerHolder setFrame:NSMakeRect(0, Editor::headerHeight, width, innerAreaH)];
+		const auto area = layout::innerArea({width, height}, Editor::headerHeight, keyboardHeight);
+		[innerHolder setFrame:NSMakeRect(area.x, area.y, area.w, area.h)];
 		bool showInner = view == "plugin" && innerGuiCreated;
 		[innerHolder setHidden:!showInner];
-		if (innerGuiCreated && showInner) {
-			auto *inner = plugin.innerForGui();
-			auto *gui = innerGui();
-			if (inner && gui && gui->can_resize(inner->plugin())) {
-				uint32_t w = width, h = innerAreaH;
-				bool adj = gui->adjust_size(inner->plugin(), &w, &h);
-				if (adj) gui->set_size(inner->plugin(), w, h);
-				if (std::getenv("PLUGINCIRCUIT_DEBUG_UI")) std::fprintf(stderr, "[plugincircuit] inner resizable: area %ux%u -> adjust %d %ux%u\n", width, innerAreaH, int(adj), w, h);
-			}
-			// A fixed-size inner GUI: centre it. A WCLAP webview GUI (a WKWebView) is scaled to fill the area,
-			// keeping its aspect ratio, with WebKit's page zoom (the page still lays out at its own size).
-			for (NSView *v in innerHolder.subviews) {
-				NSRect f = v.frame;
-				bool fixed = !(inner && gui && gui->can_resize(inner->plugin()));
-				if (fixed && innerW > 0 && innerH > 0 && [v isKindOfClass:[WKWebView class]] && innerAreaH > 0) {
-					double s = std::clamp(std::min(double(width) / innerW, double(innerAreaH) / innerH), 0.5, 4.0);
-					((WKWebView *)v).pageZoom = s;
-					f.size = NSMakeSize(std::floor(innerW * s), std::floor(innerH * s));
-				}
-				if (std::getenv("PLUGINCIRCUIT_DEBUG_UI")) std::fprintf(stderr, "[plugincircuit] inner view %.0fx%.0f in %ux%u, fixed %d\n", f.size.width, f.size.height, width, innerAreaH, int(fixed));
-				f.origin.x = std::max<CGFloat>(0, (width - f.size.width) / 2);
-				f.origin.y = 0;
-				[v setFrame:f];
-			}
+		if (!innerGuiCreated || !showInner) return;
+		auto *inner = plugin.innerForGui();
+		auto *gui = innerGui();
+		const bool resizable = inner && gui && gui->can_resize(inner->plugin());
+		layout::Size viewSize{innerW, innerH};
+		if (resizable) {
+			uint32_t w = uint32_t(area.w), h = uint32_t(area.h);
+			bool adj = gui->adjust_size(inner->plugin(), &w, &h);
+			if (adj && layout::fits({w, h}, area) && gui->set_size(inner->plugin(), w, h)) viewSize = {w, h};
+			if (std::getenv("PLUGINCIRCUIT_DEBUG_UI")) std::fprintf(stderr, "[plugincircuit] inner resizable: area %.0fx%.0f -> adjust %d %ux%u\n", area.w, area.h, int(adj), w, h);
+		}
+		// A fixed-size WCLAP webview GUI (a WKWebView) is scaled to fill the area with WebKit's page zoom, keeping its
+		// aspect ratio (the page still lays out at its own size). Anything else is centred at its own size.
+		for (NSView *v in innerHolder.subviews) {
+			const bool scalable = !resizable && [v isKindOfClass:[WKWebView class]];
+			layout::Size own = resizable ? viewSize : layout::Size{uint32_t(v.frame.size.width), uint32_t(v.frame.size.height)};
+			const auto f = layout::placeInner(area, own, {innerW, innerH}, scalable);
+			if (scalable) ((WKWebView *)v).pageZoom = f.zoom;
+			if (std::getenv("PLUGINCIRCUIT_DEBUG_UI")) std::fprintf(stderr, "[plugincircuit] inner view %.0fx%.0f in %.0fx%.0f, scaled %d\n", f.w, f.h, area.w, area.h, int(scalable));
+			[v setFrame:NSMakeRect(f.x, f.y, f.w, f.h)];
 		}
 	}
 
@@ -153,11 +259,9 @@ struct Editor::Impl {
 		if (kb == keyboardHeight) return;
 		if (!open) plugin.uiAllNotesOff();
 		// grow the window rather than squeeze the plugin's GUI; if the host refuses, the strip takes the space
-		const uint32_t oldH = height;
-		height = std::max<uint32_t>(height - keyboardHeight + kb, kMinHeight);
+		const uint32_t h = actualH() - keyboardHeight + kb;
 		keyboardHeight = kb;
-		if (height != oldH && !plugin.requestHostResize(width, height)) height = oldH;
-		layout();
+		requestSize(actualW(), h);
 	}
 
 	void setView(const std::string &v) {
@@ -243,7 +347,19 @@ struct Editor::Impl {
 		}];
 	}
 
+	void applyInnerSize(uint32_t w, uint32_t h) {
+		innerW = w;
+		innerH = h;
+		if (inLayout) { // the inner GUI answered our set_size with a request: settle it on the next tick
+			pendingInnerSize.store((uint64_t(w) << 32) | h);
+			return;
+		}
+		fitToInner();
+	}
+
 	void tick() {
+		if (uint64_t s = pendingInnerSize.exchange(0)) applyInnerSize(uint32_t(s >> 32), uint32_t(s));
+		if (uint64_t s = plugin.pendingInnerResize.exchange(0, std::memory_order_acquire)) applyInnerSize(uint32_t(s >> 32), uint32_t(s));
 		debugHooks();
 		plugin.housekeeping(); // also covers hosts without timer-support
 		auto version = plugin.stateVersion_.load();
@@ -284,6 +400,52 @@ struct Editor::Impl {
 			setKeyboard(num("open") != 0);
 		} else if (method == "setParam") {
 			plugin.uiSetParam((clap_id)num("id"), num("value"));
+		} else if (method == "cacheList") { // settings: the package and compile caches
+			const auto current = plugin.currentPackageSha();
+			auto list = choc::value::createEmptyArray();
+			uint64_t total = 0;
+			for (auto &p : PackageCache::list()) {
+				total += p.bytes;
+				list.addArrayElement(choc::value::createObject("Package", "sha256", p.sha256, "name", p.name, "vendor", p.vendor,
+				                                               "bytes", (int64_t)p.bytes, "lastUsed", p.lastUsed, "lastSaved", p.lastSaved,
+				                                               "inUse", p.inUse, "current", p.sha256 == current));
+			}
+			return choc::value::createObject("Caches", "packages", list, "packagesBytes", (int64_t)total,
+			                                 "compiledBytes", (int64_t)PackageCache::compiledBytes());
+		} else if (method == "cacheDelete") { // {shas: [...]}: skips packages in use
+			int deleted = 0;
+			auto skipped = choc::value::createEmptyArray();
+			if (a.isObject() && a.hasObjectMember("shas") && a["shas"].isArray())
+				for (auto s : a["shas"]) {
+					if (!s.isString()) continue;
+					std::string why;
+					if (PackageCache::remove(std::string(s.getString()), why)) ++deleted;
+					else skipped.addArrayElement(choc::value::createObject("Skipped", "sha256", std::string(s.getString()), "why", why));
+				}
+			plugin.packagesChanged();
+			return choc::value::createObject("Deleted", "deleted", deleted, "skipped", skipped);
+		} else if (method == "perfGet") { // settings > Performance: totals, the reader takes deltas
+			auto &perf = plugin.performance;
+			return choc::value::createObject("Performance", "blocks", (int64_t)perf.blocks.load(), "overBudget",
+			                                 (int64_t)perf.overBudget.load(), "loadPpmSum", (int64_t)perf.loadPpmSum.load(),
+			                                 "peakPpm", (int64_t)perf.peakPpm.exchange(0), "skipped",
+			                                 (int64_t)wclap_audio_skipped_blocks(), "blockFrames",
+			                                 (int64_t)perf.blockFrames.load(), "sampleRate", plugin.sampleRate());
+		} else if (method == "settingsGet") {
+			const auto s = Settings::load();
+			return choc::value::createObject("Settings", "audioWaitRatio", double(s.audioWaitRatio), "concealDropouts",
+			                                 s.concealDropouts, "skippedBlocks", (int64_t)wclap_audio_skipped_blocks());
+		} else if (method == "settingsSet") {
+			auto s = Settings::load();
+			if (a.isObject() && a.hasObjectMember("audioWaitRatio")) s.audioWaitRatio = float(num("audioWaitRatio", s.audioWaitRatio));
+			if (a.isObject() && a.hasObjectMember("concealDropouts") && a["concealDropouts"].isBool()) s.concealDropouts = a["concealDropouts"].getBool();
+			s.save();
+			s.apply();
+		} else if (method == "cacheClearCompiled") {
+			PackageCache::clearCompiled();
+		} else if (method == "paramText") { // the plugin's own text for a value (value_to_text), e.g. while dragging
+			auto *inner = plugin.innerForGui();
+			return choc::value::Value(inner ? inner->paramText((clap_id)num("id"), num("value")) : std::string());
 		} else if (method == "mapMacro") {
 			plugin.uiMapMacro((uint32_t)num("slot"), (clap_id)num("paramId"), num("min"), num("max", 1), num("add") != 0);
 		} else if (method == "unmapMacro") {
@@ -303,7 +465,14 @@ struct Editor::Impl {
 	}
 
 	bool create() {
-		container = [[PluginCircuitFlippedView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
+		container = [[PluginCircuitContainerView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
+		container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+		container.onResize = ^{
+			if (!container.superview) return;
+			width = actualW(); // the host resized us (drag, request_resize, or on its own)
+			height = actualH();
+			layout();
+		};
 		container.wantsLayer = YES;
 		container.layer.backgroundColor = [NSColor colorWithSRGBRed:0x15 / 255.0 green:0x1b / 255.0 blue:0x24 / 255.0 alpha:1].CGColor;
 
@@ -374,6 +543,7 @@ struct Editor::Impl {
 	}
 
 	~Impl() {
+		container.onResize = nil;
 		if (keyMonitor) [NSEvent removeMonitor:keyMonitor];
 		keyMonitor = nil;
 		plugin.uiAllNotesOff(); // notes held on the on-screen keyboard die with the editor
@@ -403,19 +573,24 @@ bool Editor::getSize(uint32_t &w, uint32_t &h) {
 	return true;
 }
 bool Editor::adjustSize(uint32_t &w, uint32_t &h) {
-	w = std::max<uint32_t>(w, Impl::kMinWidth);
-	h = std::max<uint32_t>(h, Impl::kMinHeight);
+	const auto s = impl->adjust({w, h});
+	w = s.w;
+	h = s.h;
 	return true;
 }
 bool Editor::setSize(uint32_t w, uint32_t h) {
-	impl->width = std::max<uint32_t>(w, Impl::kMinWidth);
-	impl->height = std::max<uint32_t>(h, Impl::kMinHeight);
+	const auto s = layout::clampEditor({w, h}, impl->minHeight());
+	impl->width = s.w;
+	impl->height = s.h;
+	// the host sizes its parent view; ours follows it (autoresizing). Hosts that only call set_size: size it here.
+	if (impl->container.superview) [impl->container setFrameSize:NSMakeSize(impl->width, impl->height)];
 	impl->layout();
 	return true;
 }
 bool Editor::setParent(const clap_window *window) {
 	if (!window || std::strcmp(window->api, CLAP_WINDOW_API_COCOA) != 0) return false;
 	NSView *parent = (__bridge NSView *)window->cocoa;
+	[impl->container setFrameSize:NSMakeSize(impl->width, impl->height)];
 	[parent addSubview:impl->container];
 	impl->layout();
 	return true;
@@ -436,10 +611,8 @@ void Editor::innerDidChange() {
 	impl->layout();
 	impl->lastVersion = 0;
 }
-bool Editor::innerRequestResize(uint32_t w, uint32_t h) {
-	impl->innerW = w;
-	impl->innerH = h;
-	impl->fitToInner();
+bool Editor::innerRequestResize(uint32_t w, uint32_t h) { // main thread (other threads: the plugin's pendingInnerResize)
+	impl->applyInnerSize(w, h);
 	return true;
 }
 

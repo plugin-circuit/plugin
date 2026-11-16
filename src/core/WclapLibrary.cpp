@@ -1,5 +1,8 @@
 #include "core/WclapLibrary.h"
 
+#include "core/PackageCache.h"
+#include "core/Settings.h"
+
 #include "core/Util.h"
 
 #include <map>
@@ -42,11 +45,14 @@ bool WclapLibrary::ensureGlobalInit(std::string &error) {
 	if (globalInitDone) return true;
 	// The bridge prefixes ids/names by default in its own plugin; we want the WCLAP's real ids.
 	wclap_set_strings("", "", "");
-	if (!wclap_global_init(0)) {
+	PackageCache::dropArchives();
+	// compiled modules go to our own folder, with a size limit (Wasmtime prunes it)
+	if (!wclap_global_init_with_cache(0, PackageCache::writeCompileCacheConfig().c_str())) {
 		error = "wclap_global_init failed";
 		return false;
 	}
 	globalInitDone = true;
+	Settings::load().apply(); // the audio wait for single-threaded WCLAPs
 	return true;
 }
 

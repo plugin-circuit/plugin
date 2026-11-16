@@ -43,6 +43,7 @@ std::string urlEncode(const std::string &s);
 struct Paths {
 	static fs::path root();                                // ~/Library/Application Support/PluginCircuit
 	static fs::path packages() { return root() / "packages"; } // <sha256>/ extracted bundles
+	static fs::path compiled() { return root() / "compiled"; } // Wasmtime's compile cache (PackageCache)
 	static fs::path pluginData(const std::string &packageId); // presets/cache/var for one package
 	static std::string apiBase();                          // PLUGINCIRCUIT_API env or http://127.0.0.1:7790
 };

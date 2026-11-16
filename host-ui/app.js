@@ -7,6 +7,9 @@ const $ = (id) => document.getElementById(id);
 const call = (method, payload = {}) =>
   typeof window.plugincircuitCall === "function" ? window.plugincircuitCall(method, payload) : Promise.resolve(null);
 
+// a plugin UI, not a web page: no browser context menu (Reload, Inspect Element, ...)
+window.addEventListener("contextmenu", (e) => e.preventDefault(), { capture: true });
+
 // forward page errors to the native log (stderr / host log)
 const log = (...a) => call("log", { text: a.map(String).join(" ") });
 window.addEventListener("error", (e) => log("error:", e.message, e.filename + ":" + e.lineno));
@@ -33,7 +36,12 @@ window.plugincircuitHost = {
     else if (state.snap) Object.assign(state.snap, { status: s.status, message: s.message, progress: s.progress, version: s.version,
       hostTransport: s.hostTransport, transportPlaying: s.transportPlaying });
     s.macroValues.forEach((v, i) => { if (!state.dragging.has("m" + i)) state.values[i] = v; });
-    for (const pv of s.paramValues) if (!state.dragging.has("p" + pv.id)) state.paramValues.set(pv.id, pv);
+    // while a param is dragged its value is ours, but its text is always the plugin's
+    for (const pv of s.paramValues) {
+      const cur = state.paramValues.get(pv.id);
+      if (!state.dragging.has("p" + pv.id) || !cur) state.paramValues.set(pv.id, pv);
+      else if (cur.value === pv.value) cur.text = pv.text;
+    }
     if (s.view && (s.view !== state.view || !state.initialised) && !recentlyChanged("view")) { state.initialised = true; setView(s.view, false); }
     if (typeof s.keyboard === "boolean" && !recentlyChanged("keyboard")) showKeyboard(s.keyboard, false);
     if (recentlyChanged("transport") && state.snap) state.snap.transportPlaying = state.localTransport;
@@ -53,7 +61,11 @@ function setView(view, tellHost = true) {
   state.view = view;
   document.body.dataset.view = view;
   for (const b of document.querySelectorAll(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.view === view));
+  $("pluginPill").setAttribute("aria-pressed", String(view === "browse"));
   if (view === "browse") ensurePicker();
+  $("settingsBtn").setAttribute("aria-pressed", String(view === "settings"));
+  if (view === "settings") { loadCaches(); loadSettings(); }
+  if (window.__perf) window.__perf.active(view === "settings");
   if (tellHost) {
     if (window.__debugViews) log("setView", view, new Error().stack.split("\n").slice(1, 4).join(" < "));
     call("view", { view });
@@ -84,7 +96,6 @@ window.addEventListener("message", (e) => {
 });
 
 // ---------------------------------------------------------------- rendering
-const TYPE_COLOR = { instrument: "--t-instrument", "audio-effect": "--t-audio-effect", "note-effect": "--t-note-effect", analyzer: "--t-analyzer" };
 
 function render(full) {
   const s = state.snap;
@@ -112,11 +123,10 @@ function render(full) {
   // header
   if (plugin) {
     $("slotName").textContent = plugin.name || plugin.id;
-    $("slotVendor").textContent = plugin.vendor || "";
+    $("pluginPill").title = `${plugin.name || plugin.id}${plugin.vendor ? " by " + plugin.vendor : ""}: choose another plugin (⌘4)`;
     $("mpeBadge").hidden = !plugin.mpe;
-    $("typeDot").style.background = `var(${TYPE_COLOR[plugin.type] || "--t-other"})`;
   }
-  $("slotHint").textContent = s.instrument ? "Pick an instrument from the catalog" : "Pick an effect from the catalog";
+  $("slotHint").textContent = s.instrument ? "Choose an instrument" : "Choose an effect";
   const st = $("status");
   const label = { ready: "", fetching: "Fetching", downloading: `${Math.round((s.progress || 0) * 100)}%`, compiling: "Compiling", missing: "Missing", error: "Error", empty: "" }[s.status] || "";
   st.textContent = label;
@@ -190,7 +200,7 @@ function macroText(i) {
   if (!m.targets.length) return "—";
   if (m.targets.length > 1) return `${Math.round(state.values[i] * 100)} %  ·  ${m.targets.length} targets`;
   const pv = state.paramValues.get(m.targets[0].id);
-  return pv ? pv.text : `${Math.round(state.values[i] * 100)} %`;
+  return pv ? pv.text : ""; // the target's text arrives with the next snapshot
 }
 
 function renderKnobs() {
@@ -379,8 +389,12 @@ function renderParams() {
       let v = p.min + (p.max - p.min) * n;
       if (p.stepped) v = Math.round(v);
       const pv = state.paramValues.get(p.id) || { id: p.id, text: "" };
-      state.paramValues.set(p.id, { ...pv, value: v, text: p.stepped ? String(v) : v.toFixed(3) });
+      const next = { ...pv, value: v }; // keep the last text until the plugin formats this value
+      state.paramValues.set(p.id, next);
       call("setParam", { id: p.id, value: v });
+      Promise.resolve(call("paramText", { id: p.id, value: v })).then((t) => {
+        if (typeof t === "string" && t && state.paramValues.get(p.id) === next) { next.text = t; updateParam(row, p); }
+      }).catch(() => {});
       updateParam(row, p);
     }, "horizontal", () => call("setParam", { id: p.id, value: p.default }));
     root.appendChild(row);
@@ -424,6 +438,8 @@ function renderInstalled() {
 
 // ---------------------------------------------------------------- wiring
 for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => setView(b.dataset.view);
+// the plugin pill opens the picker; with a plugin loaded, a second click goes back to it
+$("pluginPill").onclick = () => setView(state.view === "browse" && document.body.classList.contains("has-plugin") ? "plugin" : "browse");
 for (const b of document.querySelectorAll("[data-goto]")) b.onclick = () => setView(b.dataset.goto);
 $("unload").onclick = () => call("unload");
 $("openCatalog").onclick = () => {
@@ -598,3 +614,238 @@ $("transportToggle").onclick = toggleTransport;
 
 document.body.dataset.view = "browse";
 call("ready");
+
+// the wordmark opens the catalog website in the default browser
+{
+  const brand = document.querySelector(".brand");
+  brand.title = "Open the Plugin Circuit website";
+  brand.setAttribute("role", "link");
+  brand.addEventListener("click", () => call("openUrl", { url: apiBase() + "/" }));
+}
+
+// ---------------------------------------------------------------- settings: caches
+const DAY = 86400;
+const cache = { list: [], selected: new Set(), back: "plugin" };
+$("settingsBtn").onclick = () => {
+  if (state.view === "settings") setView(cache.back);
+  else { cache.back = state.view || "plugin"; setView("settings"); }
+};
+
+function formatBytes(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)} MB`;
+  return `${Math.max(1, Math.round(n / 1e3))} KB`;
+}
+function formatAgo(t) {
+  if (!t) return "never";
+  const d = Math.floor((Date.now() / 1000 - t) / DAY);
+  return d <= 0 ? "today" : d === 1 ? "yesterday" : d < 60 ? `${d} days ago` : `${Math.round(d / 30)} months ago`;
+}
+const unused = (p) => !p.inUse && Date.now() / 1000 - Math.max(p.lastUsed, p.lastSaved) > 30 * DAY;
+
+async function loadCaches() {
+  let r;
+  try { r = await call("cacheList"); } catch (e) { r = null; }
+  if (!r || !Array.isArray(r.packages)) { $("cacheSummary").textContent = "Not available"; return; }
+  cache.list = r.packages.sort((a, b) => Math.max(b.lastUsed, b.lastSaved) - Math.max(a.lastUsed, a.lastSaved));
+  for (const sha of [...cache.selected]) if (!cache.list.some((p) => p.sha256 === sha && !p.inUse)) cache.selected.delete(sha);
+  $("cacheSummary").textContent = `${cache.list.length} plugin${cache.list.length === 1 ? "" : "s"}, ${formatBytes(r.packagesBytes)} downloaded · ${formatBytes(r.compiledBytes)} compiled`;
+  $("compiledSize").textContent = formatBytes(r.compiledBytes);
+  renderCaches();
+}
+
+function renderCaches() {
+  const root = $("cacheList");
+  root.innerHTML = "";
+  if (!cache.list.length) { root.innerHTML = `<div class="cache-empty">No downloaded plugins.</div>`; }
+  for (const p of cache.list) {
+    const row = document.createElement("label");
+    row.className = "cache-row";
+    row.setAttribute("role", "listitem");
+    row.innerHTML = `<input type="checkbox"><span class="cache-name"><span class="n"></span><span class="cache-sub"></span></span><span class="cache-badges"></span><span class="cache-size"></span><span class="cache-used"></span>`;
+    const box = row.querySelector("input");
+    box.checked = cache.selected.has(p.sha256);
+    box.disabled = p.inUse;
+    box.onchange = () => { box.checked ? cache.selected.add(p.sha256) : cache.selected.delete(p.sha256); updateCacheButtons(); };
+    row.querySelector(".n").textContent = p.name || p.sha256.slice(0, 12);
+    row.querySelector(".cache-sub").textContent = p.vendor || "";
+    const badges = row.querySelector(".cache-badges");
+    const badge = (text, title) => { const c = document.createElement("span"); c.className = "chip"; c.textContent = text; c.title = title; badges.appendChild(c); };
+    if (p.current) badge("Loaded", "Loaded here: can't be deleted");
+    else if (p.inUse) badge("In use", "Loaded in another plugin instance: can't be deleted");
+    if (p.lastSaved) badge("In a session", `Saved in a DAW session ${formatAgo(p.lastSaved)}`);
+    row.querySelector(".cache-size").textContent = formatBytes(p.bytes);
+    row.querySelector(".cache-used").textContent = formatAgo(Math.max(p.lastUsed, p.lastSaved));
+    root.appendChild(row);
+  }
+  updateCacheButtons();
+}
+
+function updateCacheButtons() {
+  $("cacheDeleteSelected").disabled = cache.selected.size === 0;
+  $("cacheDeleteSelected").textContent = cache.selected.size ? `Delete selected (${cache.selected.size})` : "Delete selected";
+  const n = cache.list.filter(unused).length;
+  $("cacheDeleteUnused").disabled = n === 0;
+  $("cacheDeleteAll").disabled = !cache.list.some((p) => !p.inUse);
+}
+
+// a destructive button asks once more inline (no browser dialogs inside a plugin)
+function confirmFirst(button, label, action) {
+  const original = button.textContent;
+  return () => {
+    if (!button.classList.contains("confirm")) {
+      button.classList.add("confirm");
+      button.textContent = label();
+      button._timer = setTimeout(() => { button.classList.remove("confirm"); button.textContent = original; updateCacheButtons(); }, 3000);
+      return;
+    }
+    clearTimeout(button._timer);
+    button.classList.remove("confirm");
+    action();
+  };
+}
+
+async function deletePackages(shas) {
+  if (!shas.length) return;
+  const r = await call("cacheDelete", { shas });
+  for (const sha of shas) cache.selected.delete(sha);
+  await loadCaches();
+  const skipped = r && Array.isArray(r.skipped) ? r.skipped.length : 0;
+  $("cacheNote").textContent = `Deleted ${r ? r.deleted : 0}${skipped ? `, skipped ${skipped} in use` : ""}. A deleted plugin is downloaded again when a session needs it.`;
+}
+
+$("cacheDeleteSelected").onclick = confirmFirst($("cacheDeleteSelected"), () => `Delete ${cache.selected.size}? Click again`,
+  () => deletePackages([...cache.selected]));
+$("cacheDeleteUnused").onclick = confirmFirst($("cacheDeleteUnused"), () => `Delete ${cache.list.filter(unused).length}? Click again`,
+  () => deletePackages(cache.list.filter(unused).map((p) => p.sha256)));
+$("cacheDeleteAll").onclick = confirmFirst($("cacheDeleteAll"), () => `Delete all ${cache.list.filter((p) => !p.inUse).length}? Click again`,
+  () => deletePackages(cache.list.filter((p) => !p.inUse).map((p) => p.sha256)));
+$("cacheClearCompiled").onclick = confirmFirst($("cacheClearCompiled"), () => "Clear? Click again",
+  async () => { await call("cacheClearCompiled"); loadCaches(); });
+
+// ---------------------------------------------------------------- settings: advanced
+{
+  const sel = $("audioWait");
+  for (let p = 0; p <= 90; p += 10) {
+    const o = document.createElement("option");
+    o.value = String(p / 100);
+    o.textContent = p === 0 ? "Off (try once)" : `${p}% of a block${p === 20 ? " (default)" : ""}`;
+    sel.appendChild(o);
+  }
+  sel.onchange = async () => { await call("settingsSet", { audioWaitRatio: Number(sel.value) }); loadSettings(); };
+  $("concealDropouts").onchange = async (e) => { await call("settingsSet", { concealDropouts: e.target.checked }); loadSettings(); };
+}
+async function loadSettings() {
+  let s;
+  try { s = await call("settingsGet"); } catch (e) { s = null; }
+  if (!s || typeof s.audioWaitRatio !== "number") return;
+  $("audioWait").value = String(Math.round(s.audioWaitRatio * 10) / 10);
+  $("concealDropouts").checked = s.concealDropouts !== false;
+  $("audioWaitNote").textContent = s.skippedBlocks
+    ? `${s.skippedBlocks} block${s.skippedBlocks === 1 ? "" : "s"} skipped since Plugin Circuit started. More than a few while you work: raise the wait.`
+    : "No blocks skipped since Plugin Circuit started.";
+}
+
+// ---------------------------------------------------------------- settings: performance
+// DSP load per poll (10 Hz) = average of each block's time / its real-time duration; the last 60 s are drawn.
+// Reached as window.__perf: setView() may run before this file has finished evaluating.
+const perf = (window.__perf = (() => {
+  const N = 600, POLL_MS = 100;
+  const hist = []; // {load, peak, skipped, over}
+  let last = null, timer = null, totals = { skipped: 0, over: 0 }, base = null;
+
+  async function poll() {
+    let r;
+    try { r = await call("perfGet"); } catch (e) { return; }
+    if (!r || typeof r.blocks !== "number") return;
+    if (!base) base = { skipped: r.skipped, over: r.overBudget };
+    if (last) {
+      const blocks = r.blocks - last.blocks;
+      const load = blocks > 0 ? (r.loadPpmSum - last.loadPpmSum) / blocks / 1e6 : 0;
+      hist.push({ load, peak: blocks > 0 ? r.peakPpm / 1e6 : 0, skipped: Math.max(0, r.skipped - last.skipped), over: Math.max(0, r.overBudget - last.overBudget), live: blocks > 0 });
+      if (hist.length > N) hist.shift();
+    }
+    totals = { skipped: r.skipped - base.skipped, over: r.overBudget - base.over };
+    last = r;
+    render(r);
+  }
+
+  function pct(x) { return `${(x * 100).toFixed(x < 0.1 ? 1 : 0)} %`; }
+  function render(r) {
+    const live = hist.filter((h) => h.live);
+    const recent = live.slice(-10); // the last second
+    const load = recent.length ? recent.reduce((a, h) => a + h.load, 0) / recent.length : 0;
+    const peak = live.length ? Math.max(...live.slice(-100).map((h) => h.peak)) : 0;
+    $("perfLoad").textContent = live.length ? pct(load) : "–";
+    $("perfPeak").textContent = live.length ? pct(peak) : "–";
+    $("perfBlock").textContent = r.blockFrames ? `${r.blockFrames} @ ${Math.round(r.sampleRate / 100) / 10} kHz` : "–";
+    $("perfSkipped").textContent = String(totals.skipped);
+    $("perfOver").textContent = String(totals.over);
+    $("perfSummary").textContent = live.length
+      ? `${pct(load)} of each ${(1000 * r.blockFrames / r.sampleRate).toFixed(2)} ms block, peak ${pct(peak)} over the last 10 s`
+      : "No audio is being processed.";
+    draw();
+  }
+
+  function draw() {
+    const c = $("perfGraph"), dpr = window.devicePixelRatio || 1;
+    const w = c.clientWidth, h = c.clientHeight;
+    if (!w) return;
+    if (c.width !== Math.round(w * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
+    const g = c.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    const css = getComputedStyle(document.body);
+    const col = (v, d) => css.getPropertyValue(v).trim() || d;
+    const top = 14, bottom = h - 14, scale = Math.max(1, ...hist.map((x) => x.peak)) > 1 ? 1.5 : 1; // up to 100 % (150 % if exceeded)
+    const y = (v) => bottom - Math.min(v / scale, 1) * (bottom - top);
+    const x = (i) => w - (hist.length - 1 - i) * (w / (N - 1));
+    // grid: 25 / 50 / 75 / 100 %
+    g.strokeStyle = col("--c-line", "#333"); g.lineWidth = 1; g.fillStyle = col("--c-text-faint", "#777"); g.font = "10px ui-monospace, monospace";
+    for (const v of [0.25, 0.5, 0.75, 1]) {
+      g.beginPath(); g.moveTo(0, Math.round(y(v)) + 0.5); g.lineTo(w, Math.round(y(v)) + 0.5); g.stroke();
+      g.fillText(`${v * 100}%`, 2, y(v) - 2);
+    }
+    if (hist.length < 2) return;
+    // load: filled area
+    g.beginPath(); g.moveTo(x(0), bottom);
+    hist.forEach((p, i) => g.lineTo(x(i), y(p.load)));
+    g.lineTo(x(hist.length - 1), bottom); g.closePath();
+    g.globalAlpha = 0.35; g.fillStyle = col("--c-accent-ink", "#a78bfa"); g.fill(); g.globalAlpha = 1;
+    g.beginPath(); hist.forEach((p, i) => (i ? g.lineTo(x(i), y(p.load)) : g.moveTo(x(i), y(p.load))));
+    g.strokeStyle = col("--c-accent-ink", "#a78bfa"); g.lineWidth = 1.5; g.stroke();
+    // peak: thin line
+    g.beginPath(); hist.forEach((p, i) => (i ? g.lineTo(x(i), y(p.peak)) : g.moveTo(x(i), y(p.peak))));
+    g.strokeStyle = col("--c-text-muted", "#999"); g.lineWidth = 1; g.stroke();
+    // dropouts: ticks along the bottom (skipped: red, too slow: orange)
+    hist.forEach((p, i) => {
+      if (p.skipped) { g.fillStyle = col("--c-danger", "#ef4444"); g.fillRect(x(i) - 1, bottom + 2, 2, 10); }
+      if (p.over) { g.fillStyle = "#e8a33d"; g.fillRect(x(i) - 1, top, 2, bottom - top); }
+    });
+  }
+
+  $("perfReset").onclick = () => { hist.length = 0; base = null; last = null; poll(); };
+  return {
+    redraw: draw,
+    active(on) {
+      if (on && !timer) { poll(); timer = setInterval(poll, POLL_MS); }
+      else if (!on && timer) { clearInterval(timer); timer = null; }
+    },
+  };
+})());
+if (state.view === "settings") perf.active(true);
+
+// ---------------------------------------------------------------- settings: tabs (on the right)
+{
+  const tabs = [...document.querySelectorAll(".settings-tabs button")];
+  const show = (name) => {
+    for (const t of tabs) t.setAttribute("aria-selected", String(t.dataset.tab === name));
+    for (const g of document.querySelectorAll(".setting-group[data-tab]")) g.hidden = g.dataset.tab !== name;
+    try { localStorage.setItem("plugincircuit.settingsTab", name); } catch (e) {}
+    if (name === "performance") requestAnimationFrame(() => window.__perf && window.__perf.redraw());
+  };
+  for (const t of tabs) t.onclick = () => show(t.dataset.tab);
+  let saved = "performance";
+  try { saved = localStorage.getItem("plugincircuit.settingsTab") || saved; } catch (e) {}
+  show(tabs.some((t) => t.dataset.tab === saved) ? saved : "performance");
+}

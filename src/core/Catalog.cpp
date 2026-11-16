@@ -104,10 +104,6 @@ static fs::path installVerified(const std::vector<uint8_t> &archive, const std::
 		fs::remove_all(tmp, ec);
 		return {};
 	}
-	{
-		std::ofstream f(tmp / "bundle.wclap.tar.gz", std::ios::binary);
-		f.write(reinterpret_cast<const char *>(archive.data()), (std::streamsize)archive.size());
-	}
 	if (findWclapRoot(tmp / "bundle").empty()) {
 		error = "bundle has no module.wasm";
 		fs::remove_all(tmp, ec);

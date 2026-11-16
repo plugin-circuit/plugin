@@ -2,6 +2,7 @@
 
 #include "gui/Editor.h"
 
+#include <chrono>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -135,6 +136,7 @@ void PluginCircuitPlugin::EventBuffer::push(const clap_event_header *e) {
 
 // ---- lifecycle ------------------------------------------------------------------------------------
 bool PluginCircuitPlugin::init() {
+	mainThreadId_ = std::this_thread::get_id();
 	auto ext = [&](const char *id) { return host_->get_extension(host_, id); };
 	hostParams_ = (const clap_host_params *)ext(CLAP_EXT_PARAMS);
 	hostState_ = (const clap_host_state *)ext(CLAP_EXT_STATE);
@@ -354,6 +356,24 @@ const clap_event_transport *PluginCircuitPlugin::transportFor(const clap_process
 }
 
 clap_process_status PluginCircuitPlugin::process(const clap_process *p) {
+	const auto t0 = std::chrono::steady_clock::now(); // a user-space counter read: no syscall
+	const auto status = processBlock(p);
+	const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	const double budget = sampleRate_ > 0 ? double(p->frames_count) / sampleRate_ : 0;
+	if (budget > 0) {
+		const auto ppm = uint32_t(std::min(seconds / budget, 100.0) * 1e6);
+		performance.loadPpmSum.fetch_add(ppm, std::memory_order_relaxed);
+		performance.blocks.fetch_add(1, std::memory_order_relaxed);
+		if (seconds > budget) performance.overBudget.fetch_add(1, std::memory_order_relaxed);
+		uint32_t peak = performance.peakPpm.load(std::memory_order_relaxed);
+		while (ppm > peak && !performance.peakPpm.compare_exchange_weak(peak, ppm, std::memory_order_relaxed)) {
+		}
+		performance.blockFrames.store(p->frames_count, std::memory_order_relaxed);
+	}
+	return status;
+}
+
+clap_process_status PluginCircuitPlugin::processBlock(const clap_process *p) {
 	outerOut_ = p->out_events;
 	const MacroMap *map = macros_.load(std::memory_order_acquire);
 
@@ -520,6 +540,7 @@ bool PluginCircuitPlugin::stateSave(const clap_ostream *stream) {
 			s.packageSha256 = meta.sha256;
 			s.moduleSha256 = meta.moduleSha256;
 			current_->inner->saveState(s.innerState);
+			PackageCache::markSaved(meta.sha256); // the package is in a DAW session now
 			for (auto &p : current_->inner->params()) {
 				double v;
 				if (p.automatable() && current_->inner->paramValue(p.id, v)) s.innerParams[p.id] = v;
@@ -652,6 +673,19 @@ void PluginCircuitPlugin::startLoad(LoadJob job) {
 				result->error = "download failed: " + error;
 				result->missing = true;
 			} else {
+				// hold the package (a delete from the settings page skips it from now on); if a delete got it first,
+				// fetch it again and hold that
+				result->inUse = PackageCache::InUse(meta.sha256);
+				for (int attempt = 0; !result->inUse.held() && attempt < 3 && !dir.empty(); ++attempt) {
+					dir = Catalog::ensurePackage(meta.sha256, {}, error);
+					if (!dir.empty()) result->inUse = PackageCache::InUse(meta.sha256);
+				}
+			}
+			if (dir.empty() || !result->inUse.held()) {
+				result->error = "download failed: " + (error.empty() ? std::string("the package was deleted while loading") : error);
+				result->missing = true;
+			} else {
+				PackageCache::markUsed(meta.sha256);
 				Catalog::writeMeta(meta.sha256, meta);
 				setStatus(Status::Compiling, meta.name);
 				result->module = WclapLibrary::open(dir.string(), Paths::pluginData(meta.packageId.empty() ? meta.id : meta.packageId).string(), error);
@@ -685,7 +719,13 @@ InnerHostCallbacks PluginCircuitPlugin::makeInnerCallbacks() {
 	cb.paramsRequestFlush = [this] { if (hostParams_) hostParams_->request_flush(host_); };
 	cb.stateMarkDirty = [this] { markDirty(); };
 	cb.latencyChanged = [this] { host_->request_restart(host_); };
-	cb.guiRequestResize = [this](uint32_t w, uint32_t h) { return editor_ ? editor_->innerRequestResize(w, h) : false; };
+	cb.guiRequestResize = [this](uint32_t w, uint32_t h) {
+		if (!isMainThread()) { // [thread-safe]: hand it to the main thread; the editor may be closing right now
+			pendingInnerResize.store((uint64_t(w) << 32) | h, std::memory_order_release);
+			return true;
+		}
+		return editor_ ? editor_->innerRequestResize(w, h) : false;
+	};
 	cb.registerTimer = [this](uint32_t period, clap_id *id) {
 		return hostTimer_ && hostTimer_->register_timer(host_, period, id);
 	};
@@ -717,6 +757,7 @@ void PluginCircuitPlugin::finishLoad(std::unique_ptr<LoadJob> job) {
 	}
 	auto slot = std::make_unique<Slot>();
 	slot->meta = job->meta;
+	slot->inUse = std::move(job->inUse);
 	slot->inner = std::move(inner);
 
 	if (job->state) {

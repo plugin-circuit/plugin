@@ -1,4 +1,4 @@
-// plugincircuit-smoke <bundle.wclap.tar.gz | bundle-dir> [--blocks N] [--json]
+// plugincircuit-smoke <bundle.wclap.tar.gz | bundle-dir> [--blocks N] [--json] [--params] [--no-transport]
 // Loads every plugin in a WCLAP through wclap-bridge + InnerPlugin, processes audio
 // (notes for instruments, noise for effects), round-trips state, and reports one line per plugin.
 #include "core/Catalog.h"
@@ -55,21 +55,44 @@ clap_event_note note(uint16_t type, uint32_t time, int16_t key, double velocity)
 	return e;
 }
 
+constexpr int kSmokeKeys[] = {36, 38, 42, 60, 64, 67};
+
+// A 120 bpm 4/4 transport, as a DAW sends it: grooveboxes and sequencers stay silent without a playing one.
+clap_event_transport transportAt(int64_t sampleTime, double sampleRate, bool playing) {
+	constexpr double kTempo = 120.0;
+	clap_event_transport t{};
+	t.header = {sizeof(t), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, 0};
+	t.flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE |
+	          CLAP_TRANSPORT_HAS_TIME_SIGNATURE | (playing ? CLAP_TRANSPORT_IS_PLAYING : 0);
+	const double seconds = double(sampleTime) / sampleRate, beats = seconds * kTempo / 60.0;
+	t.song_pos_beats = clap_beattime(std::llround(beats * double(CLAP_BEATTIME_FACTOR)));
+	t.song_pos_seconds = clap_sectime(std::llround(seconds * double(CLAP_SECTIME_FACTOR)));
+	t.tempo = kTempo;
+	t.bar_start = clap_beattime(std::llround(std::floor(beats / 4.0) * 4.0 * double(CLAP_BEATTIME_FACTOR)));
+	t.bar_number = int32_t(beats / 4.0);
+	t.tsig_num = 4;
+	t.tsig_denom = 4;
+	return t;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
 	if (argc < 2) {
-		std::fprintf(stderr, "usage: %s <bundle.wclap.tar.gz|dir> [--blocks N] [--json]\n", argv[0]);
+		std::fprintf(stderr, "usage: %s <bundle.wclap.tar.gz|dir> [--blocks N] [--json] [--params] [--no-transport]\n", argv[0]);
 		return 2;
 	}
 	mainId = std::this_thread::get_id();
 	std::string input = argv[1];
+	bool dumpParams = false, noTransport = false;
 	int blocks = 400;
 	bool json = false;
 	for (int i = 2; i < argc; ++i) {
 		std::string a = argv[i];
 		if (a == "--blocks" && i + 1 < argc) blocks = std::atoi(argv[++i]);
 		if (a == "--json") json = true;
+		if (a == "--params") dumpParams = true;
+		if (a == "--no-transport") noTransport = true;
 	}
 
 	std::string error;
@@ -146,12 +169,22 @@ int main(int argc, char **argv) {
 				r.addMember("webviewResource", std::string(got ? "ok " : "FAILED ") + mime + " " + std::to_string(res.size()));
 			}
 		}
-		r.addMember("params", (int)inner->params().size());
+		const auto params = inner->params();
+		r.addMember("params", (int)params.size());
+		if (dumpParams)
+			for (auto &pi : params) {
+				double v = 0;
+				inner->paramValue(pi.id, v);
+				std::fprintf(stderr, "param %u %s/%s = %s (%g, range %g..%g)\n", pi.id, pi.module.c_str(), pi.name.c_str(),
+				             inner->paramText(pi.id, v).c_str(), v, pi.minValue, pi.maxValue);
+			}
 		r.addMember("hasGui", inner->gui() != nullptr);
 		r.addMember("mainIn", (int)inner->mainInputChannels());
 		r.addMember("mainOut", (int)inner->mainOutputChannels());
 		r.addMember("noteIn", inner->hasNoteInput());
 		r.addMember("mpe", inner->supportsMpe());
+		r.addMember("noteDialects", (int)inner->noteDialects());
+		r.addMember("preferredDialect", (int)inner->preferredNoteDialect());
 
 		const double sr = 48000;
 		const uint32_t frames = 256;
@@ -183,19 +216,15 @@ int main(int argc, char **argv) {
 				}
 				EventList events;
 				EventSink sink;
-				if (b % 100 == 0) {
-					events.push(note(CLAP_EVENT_NOTE_ON, 0, 60, 0.8));
-					events.push(note(CLAP_EVENT_NOTE_ON, 0, 64, 0.8));
-					events.push(note(CLAP_EVENT_NOTE_ON, 0, 67, 0.8));
-				}
-				if (b % 100 == 60) {
-					events.push(note(CLAP_EVENT_NOTE_OFF, 0, 60, 0.0));
-					events.push(note(CLAP_EVENT_NOTE_OFF, 0, 64, 0.0));
-					events.push(note(CLAP_EVENT_NOTE_OFF, 0, 67, 0.0));
-				}
+				// a chord plus GM drum keys (kick, snare, hat), so drum machines that map only 36..51 sound too
+				if (b % 100 == 0)
+					for (int k : kSmokeKeys) events.push(note(CLAP_EVENT_NOTE_ON, 0, (int16_t)k, 0.8));
+				if (b % 100 == 60)
+					for (int k : kSmokeKeys) events.push(note(CLAP_EVENT_NOTE_OFF, 0, (int16_t)k, 0.0));
 				tlsAudio = true;
 				auto tb = std::chrono::steady_clock::now();
-				inner->process(ins, 2, outs, 2, frames, (int64_t)b * frames, nullptr, &events.in, &sink.out);
+				auto transport = transportAt((int64_t)b * frames, sr, true);
+				inner->process(ins, 2, outs, 2, frames, (int64_t)b * frames, noTransport ? nullptr : &transport, &events.in, &sink.out);
 				double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tb).count();
 				tlsAudio = false;
 				totalMs += ms;
@@ -227,8 +256,11 @@ int main(int argc, char **argv) {
 					std::fill(inR.begin(), inR.end(), 0.0f);
 					if (trigger && !isInstrument) inL[kAt] = inR[kAt] = 1.0f;
 					EventSink sink;
+					// stopped (not absent) transport, so a sequencer halts instead of keeping its last playing state
+					auto transport = transportAt((int64_t)(blocks + b) * frames, sr, false);
 					tlsAudio = true;
-					inner->process(ins, 2, outs, 2, frames, (int64_t)(blocks + b) * frames, nullptr, &events.in, &sink.out);
+					inner->process(ins, 2, outs, 2, frames, (int64_t)(blocks + b) * frames, noTransport ? nullptr : &transport,
+					               &events.in, &sink.out);
 					tlsAudio = false;
 					if (callbackPending) {
 						callbackPending = false;
@@ -238,7 +270,7 @@ int main(int argc, char **argv) {
 				for (uint32_t b = 0; b < silentBlocks; ++b) {
 					EventList events;
 					if (b == 0)
-						for (int k : {60, 64, 67}) events.push(note(CLAP_EVENT_NOTE_OFF, 0, k, 0.0));
+						for (int k : kSmokeKeys) events.push(note(CLAP_EVENT_NOTE_OFF, 0, (int16_t)k, 0.0));
 					run(b, false, events);
 				}
 				// noise floor of the decayed tail, so a reverb's leftover doesn't count as a response
@@ -248,7 +280,8 @@ int main(int argc, char **argv) {
 				int64_t delay = -1;
 				for (uint32_t b = 0; b < probeBlocks && delay < 0; ++b) {
 					EventList events;
-					if (b == 0 && isInstrument) events.push(note(CLAP_EVENT_NOTE_ON, kAt, 60, 1.0));
+					if (b == 0 && isInstrument)
+						for (int k : {36, 60}) events.push(note(CLAP_EVENT_NOTE_ON, kAt, (int16_t)k, 1.0)); // drum machines too
 					run(silentBlocks + b, b == 0, events);
 					for (uint32_t i = (b == 0 ? kAt : 0); i < frames && delay < 0; ++i)
 						if (std::fabs(outL[i]) > threshold || std::fabs(outR[i]) > threshold)

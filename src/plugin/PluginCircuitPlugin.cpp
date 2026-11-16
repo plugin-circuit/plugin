@@ -3,6 +3,7 @@
 #include "gui/Editor.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace plugincircuit {
@@ -25,8 +26,8 @@ const clap_plugin_descriptor PluginCircuitPlugin::fxDescriptor = {
 };
 const clap_plugin_descriptor PluginCircuitPlugin::instrumentDescriptor = {
 	.clap_version = CLAP_VERSION_INIT,
-	.id = "studio.plugincircuit.host.instrument",
-	.name = "Plugin Circuit Instrument",
+	.id = "studio.plugincircuit.host.synth",
+	.name = "Plugin Circuit Synth",
 	.vendor = "Plugin Circuit",
 	.url = "http://127.0.0.1:7790",
 	.manual_url = "",
@@ -144,6 +145,7 @@ bool PluginCircuitPlugin::init() {
 	if (hostTimer_ && hostTimer_->register_timer) hostTimer_->register_timer(host_, 50, &housekeepingTimer_);
 
 	uiEvents_.reset(1024);
+	uiNotes_.reset(1024);
 	innerIn_.storage.reserve(1 << 16);
 	innerIn_.offsets.reserve(4096);
 	return true;
@@ -221,7 +223,8 @@ void PluginCircuitPlugin::passThrough(const clap_process *p) {
 	}
 }
 
-void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slot, const MacroMap *map, bool drainUi) {
+void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slot, const MacroMap *map, bool drainUi,
+                                          bool drainNotes) {
 	innerIn_.clear();
 	// UI-originated events first: they are stamped at time 0, so the list stays sorted
 	UiEvent ui;
@@ -241,10 +244,6 @@ void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slo
 			clap_event_param_gesture g{{sizeof(g), 0, CLAP_CORE_EVENT_SPACE_ID,
 			                            uint16_t(ui.kind == UiEvent::GestureBegin ? CLAP_EVENT_PARAM_GESTURE_BEGIN : CLAP_EVENT_PARAM_GESTURE_END), 0}, ui.id};
 			outerOut_->try_push(outerOut_, &g.header);
-		} else if (ui.kind == UiEvent::NoteOn || ui.kind == UiEvent::NoteOff) {
-			clap_event_note n{{sizeof(n), 0, CLAP_CORE_EVENT_SPACE_ID, uint16_t(ui.kind == UiEvent::NoteOn ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF), 0},
-			                  -1, 0, 0, int16_t(ui.id), ui.value};
-			innerIn_.push(&n.header);
 		} else if (ui.kind == UiEvent::Param) {
 			clap_event_param_value e{{sizeof(e), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, ui.id, nullptr, -1, -1, -1, -1, ui.value};
 			innerIn_.push(&e.header);
@@ -260,6 +259,11 @@ void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slo
 				}
 			}
 		}
+	}
+	while (drainNotes && uiNotes_.pop(ui)) {
+		clap_event_note n{{sizeof(n), 0, CLAP_CORE_EVENT_SPACE_ID, uint16_t(ui.kind == UiEvent::NoteOn ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF), 0},
+		                  -1, 0, 0, int16_t(ui.id), ui.value};
+		innerIn_.push(&n.header);
 	}
 	if (!in) return;
 	auto count = in->size(in);
@@ -317,12 +321,44 @@ bool PluginCircuitPlugin::innerOutTryPush(const clap_output_events *list, const 
 	return out ? out->try_push(out, h) : true; // notes, MIDI
 }
 
+const clap_event_transport *PluginCircuitPlugin::transportFor(const clap_process *p) {
+	const bool hostTransport = p->transport != nullptr;
+	if (hostTransport != hostHasTransport_.load(std::memory_order_relaxed)) {
+		hostHasTransport_.store(hostTransport, std::memory_order_relaxed);
+		stateVersion_++; // the UI shows its play button only without a host transport
+	}
+	if (hostTransport) {
+		fallbackSamples_ = 0;
+		return p->transport;
+	}
+	if (fallbackRewind_.exchange(false, std::memory_order_acquire)) fallbackSamples_ = 0;
+	const bool playing = fallbackPlaying_.load(std::memory_order_relaxed);
+	constexpr double kTempo = 120.0, kBeatsPerBar = 4.0;
+	const double seconds = double(fallbackSamples_) / sampleRate_;
+	const double beats = seconds * kTempo / 60.0;
+	auto &t = fallbackTransport_;
+	t = {};
+	t.header = {sizeof(t), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, 0};
+	t.flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE | CLAP_TRANSPORT_HAS_SECONDS_TIMELINE |
+	          CLAP_TRANSPORT_HAS_TIME_SIGNATURE | (playing ? CLAP_TRANSPORT_IS_PLAYING : 0);
+	t.song_pos_beats = clap_beattime(std::llround(beats * double(CLAP_BEATTIME_FACTOR)));
+	t.song_pos_seconds = clap_sectime(std::llround(seconds * double(CLAP_SECTIME_FACTOR)));
+	t.tempo = kTempo;
+	const double bar = std::floor(beats / kBeatsPerBar);
+	t.bar_start = clap_beattime(std::llround(bar * kBeatsPerBar * double(CLAP_BEATTIME_FACTOR)));
+	t.bar_number = int32_t(bar);
+	t.tsig_num = 4;
+	t.tsig_denom = 4;
+	if (playing) fallbackSamples_ += p->frames_count;
+	return &t;
+}
+
 clap_process_status PluginCircuitPlugin::process(const clap_process *p) {
 	outerOut_ = p->out_events;
 	const MacroMap *map = macros_.load(std::memory_order_acquire);
 
 	if (innerLock_.test_and_set(std::memory_order_acquire)) { // main thread is swapping
-		translateEvents(p->in_events, nullptr, nullptr, false);
+		translateEvents(p->in_events, nullptr, nullptr, false, false); // UI events wait for the next block
 		passThrough(p);
 		outerOut_ = nullptr;
 		processEpoch_.fetch_add(1, std::memory_order_release);
@@ -339,7 +375,7 @@ clap_process_status PluginCircuitPlugin::process(const clap_process *p) {
 	}
 	if (slot && !slot->started && slot->inner->isActive()) slot->started = slot->inner->startProcessing();
 
-	translateEvents(p->in_events, slot, map, true);
+	translateEvents(p->in_events, slot, map, true, true);
 	if (!slot || !slot->started || p->audio_outputs_count == 0) {
 		passThrough(p);
 	} else {
@@ -350,7 +386,7 @@ clap_process_status PluginCircuitPlugin::process(const clap_process *p) {
 			in = p->audio_inputs[0].data32;
 			inChannels = p->audio_inputs[0].channel_count;
 		}
-		slot->inner->process(in, inChannels, out.data32, out.channel_count, p->frames_count, p->steady_time, p->transport,
+		slot->inner->process(in, inChannels, out.data32, out.channel_count, p->frames_count, p->steady_time, transportFor(p),
 		                     &innerIn_.list, &innerOut_);
 	}
 	unlockInner();
@@ -447,7 +483,7 @@ void PluginCircuitPlugin::paramsFlush(const clap_input_events *in, const clap_ou
 	if (innerLock_.test_and_set(std::memory_order_acquire)) return;
 	outerOut_ = out;
 	auto *map = macros_.load(std::memory_order_acquire);
-	translateEvents(in, current_, map, true);
+	translateEvents(in, current_, map, true, false);
 	if (current_ && innerIn_.offsets.size()) current_->inner->paramsFlush(&innerIn_.list, &innerOut_);
 	outerOut_ = nullptr;
 	unlockInner();
@@ -609,8 +645,7 @@ void PluginCircuitPlugin::startLoad(LoadJob job) {
 			if (result->state && !result->state->packageSha256.empty()) meta.sha256 = result->state->packageSha256;
 			setStatus(Status::Downloading, meta.name);
 			auto dir = Catalog::ensurePackage(meta.sha256, [this](uint64_t got, uint64_t total) {
-				downloadProgress_ = total ? double(got) / double(total) : 0.0;
-				stateVersion_++;
+				downloadProgress_ = total ? double(got) / double(total) : 0.0; // partial snapshots carry it
 				return true;
 			}, error);
 			if (dir.empty()) {
@@ -663,6 +698,7 @@ InnerHostCallbacks PluginCircuitPlugin::makeInnerCallbacks() {
 
 void PluginCircuitPlugin::finishLoad(std::unique_ptr<LoadJob> job) {
 	loading_ = false;
+	installedAt_ = {}; // the load may have added a package
 	if (!job->module) {
 		if (job->state) missingState_ = std::move(job->state); // keep the session's data
 		setStatus(job->missing ? Status::Missing : Status::Error, job->error);
@@ -705,6 +741,7 @@ void PluginCircuitPlugin::finishLoad(std::unique_ptr<LoadJob> job) {
 }
 
 void PluginCircuitPlugin::swapIn(std::unique_ptr<Slot> slot) {
+	uiAllNotesOff(); // the old plugin is going: don't leave the new one with notes nobody releases
 	if (editor_) editor_->innerWillChange();
 	Slot *old = current_;
 	lockInner();
@@ -776,8 +813,8 @@ void PluginCircuitPlugin::markDirty() {
 // ---- UI-facing --------------------------------------------------------------------------------------------
 InnerPlugin *PluginCircuitPlugin::innerForGui() { return current_ ? current_->inner.get() : nullptr; }
 
-void PluginCircuitPlugin::requestHostResize(uint32_t w, uint32_t h) {
-	if (hostGui_) hostGui_->request_resize(host_, w, h);
+bool PluginCircuitPlugin::requestHostResize(uint32_t w, uint32_t h) {
+	return hostGui_ && hostGui_->request_resize(host_, w, h);
 }
 
 void PluginCircuitPlugin::uiLoad(const std::string &pluginId, const std::string &sha256) {
@@ -789,6 +826,7 @@ void PluginCircuitPlugin::uiLoad(const std::string &pluginId, const std::string 
 
 void PluginCircuitPlugin::uiUnload() {
 	if (!current_ && !missingState_) return;
+	uiAllNotesOff();
 	if (editor_) editor_->innerWillChange();
 	lockInner();
 	Slot *old = current_;
@@ -830,7 +868,16 @@ void PluginCircuitPlugin::uiSetParam(clap_id id, double value) {
 void PluginCircuitPlugin::uiNote(int16_t key, double velocity, bool on) {
 	if (key < 0 || key > 127) return;
 	std::lock_guard<std::mutex> lock(uiPushMutex_);
-	uiEvents_.push({on ? UiEvent::NoteOn : UiEvent::NoteOff, uint32_t(key), std::clamp(velocity, 0.0, 1.0)});
+	// A failed push (queue full) keeps the held bit as it was: a lost note-on is not held, a lost note-off still is,
+	// so uiAllNotesOff() retries it.
+	if (uiNotes_.push({on ? UiEvent::NoteOn : UiEvent::NoteOff, uint32_t(key), std::clamp(velocity, 0.0, 1.0)}))
+		uiHeldNotes_.set(size_t(key), on);
+}
+
+void PluginCircuitPlugin::uiAllNotesOff() {
+	std::lock_guard<std::mutex> lock(uiPushMutex_);
+	for (size_t k = 0; k < uiHeldNotes_.size(); ++k)
+		if (uiHeldNotes_.test(k) && uiNotes_.push({UiEvent::NoteOff, uint32_t(k), 0.0})) uiHeldNotes_.reset(k);
 }
 
 void PluginCircuitPlugin::uiMapMacro(uint32_t slot, clap_id paramId, double minValue, double maxValue, bool add) {
@@ -877,6 +924,12 @@ void PluginCircuitPlugin::uiRenameMacro(uint32_t slot, const std::string &name) 
 	markDirty();
 }
 
+void PluginCircuitPlugin::uiSetTransport(bool playing) {
+	if (playing && !fallbackPlaying_.load()) fallbackRewind_.store(true, std::memory_order_release); // play starts at bar 1
+	fallbackPlaying_.store(playing);
+	stateVersion_++;
+}
+
 void PluginCircuitPlugin::uiAutoMap() {
 	if (!current_) return;
 	publishMacros(MacroMap::autoMap(current_->inner->params()));
@@ -891,6 +944,15 @@ void PluginCircuitPlugin::uiAutoMap() {
 	markDirty();
 }
 
+const std::vector<CatalogPlugin> &PluginCircuitPlugin::installedPlugins() {
+	auto now = std::chrono::steady_clock::now();
+	if (now - installedAt_ > std::chrono::seconds(5)) { // packages installed by another instance show up too
+		installedCache_ = Catalog::installedPlugins();
+		installedAt_ = now;
+	}
+	return installedCache_;
+}
+
 choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 	static const char *statusNames[] = {"empty", "fetching", "downloading", "compiling", "ready", "missing", "error"};
 	std::string message;
@@ -900,7 +962,8 @@ choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 	}
 	auto snap = choc::value::createObject("Snapshot", "version", (int64_t)stateVersion_.load(), "status",
 	                                      std::string(statusNames[status_.load()]), "message", message, "progress",
-	                                      downloadProgress_.load(), "instrument", instrument_, "apiBase", Paths::apiBase());
+	                                      downloadProgress_.load(), "instrument", instrument_, "apiBase", Paths::apiBase(),
+	                                      "hostTransport", hostHasTransport_.load(), "transportPlaying", fallbackPlaying_.load());
 	auto values = choc::value::createEmptyArray();
 	for (auto &v : macroValues_) values.addArrayElement(v.load());
 	snap.addMember("macroValues", values);
@@ -922,7 +985,7 @@ choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 		snap.addMember("plugin", choc::value::createObject("Plugin", "id", current_->inner->pluginId(), "name", m.name, "vendor", m.vendor,
 		                                                   "type", m.type, "license", m.license, "packageId", m.packageId, "sha256", m.sha256,
 		                                                   "hasGui", inner->gui() != nullptr, "latency", (int64_t)inner->latency(),
-		                                                   "mpe", inner->supportsMpe()));
+		                                                   "mpe", inner->supportsMpe(), "noteInput", inner->hasNoteInput()));
 	} else if (missingState_) {
 		snap.addMember("missing", choc::value::createObject("Missing", "id", missingState_->pluginId, "name", missingState_->pluginName,
 		                                                    "vendor", missingState_->vendor, "sha256", missingState_->packageSha256));
@@ -944,7 +1007,7 @@ choc::value::Value PluginCircuitPlugin::uiSnapshot(bool full) {
 	snap.addMember("macros", macros);
 	snap.addMember("autoMapped", map->autoMapped);
 	auto installed = choc::value::createEmptyArray();
-	for (auto &p : Catalog::installedPlugins())
+	for (auto &p : installedPlugins())
 		if ((p.type == "instrument") == instrument_ || p.type.empty())
 			installed.addArrayElement(choc::value::createObject("I", "id", p.id, "name", p.name, "vendor", p.vendor, "type", p.type, "sha256", p.sha256));
 	snap.addMember("installed", installed);

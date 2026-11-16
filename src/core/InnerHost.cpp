@@ -1,6 +1,7 @@
 #include "core/InnerHost.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -183,9 +184,15 @@ void InnerPlugin::readPortLayout() {
 	mainOutChannels_ = outPortChannels_.empty() ? 0 : outPortChannels_[mainOutPort_];
 	noteInputPorts_ = notePorts_ ? notePorts_->count(plugin_, true) : 0;
 	mpe_ = false;
+	noteDialects_ = preferredDialect_ = 0;
 	for (uint32_t i = 0; i < noteInputPorts_; ++i) {
 		clap_note_port_info info{};
-		if (notePorts_->get(plugin_, i, true, &info) && (info.supported_dialects & CLAP_NOTE_DIALECT_MIDI_MPE)) mpe_ = true;
+		if (!notePorts_->get(plugin_, i, true, &info)) continue;
+		if (info.supported_dialects & CLAP_NOTE_DIALECT_MIDI_MPE) mpe_ = true;
+		if (i == 0) {
+			noteDialects_ = info.supported_dialects;
+			preferredDialect_ = info.preferred_dialect;
+		}
 	}
 }
 
@@ -215,8 +222,83 @@ bool InnerPlugin::activate(double sampleRate, uint32_t minFrames, uint32_t maxFr
 		outBufs_[p].data32 = outPtrs_[p].data();
 		outBufs_[p].channel_count = outPortChannels_[p];
 	}
+	// Note-dialect conversion: only when port 0 accepts exactly one of CLAP notes / MIDI.
+	const bool clapNotes = noteDialects_ & CLAP_NOTE_DIALECT_CLAP;
+	const bool midiNotes = noteDialects_ & (CLAP_NOTE_DIALECT_MIDI | CLAP_NOTE_DIALECT_MIDI_MPE);
+	noteConversion_ = (noteInputPorts_ == 0 || clapNotes == midiNotes) ? NoteConversion::None
+	                  : clapNotes                                     ? NoteConversion::MidiToClap
+	                                                                  : NoteConversion::ClapToMidi;
+	convertedList_.clear();
+	convertedMidi_.clear();
+	convertedNotes_.clear();
+	if (noteConversion_ != NoteConversion::None) {
+		convertedList_.reserve(kMaxConvertedEvents);
+		convertedMidi_.reserve(kMaxConvertedEvents);
+		convertedNotes_.reserve(kMaxConvertedEvents);
+	}
+	convertedEvents_ = clap_input_events{
+		.ctx = this,
+		.size = [](const clap_input_events *l) { return (uint32_t) static_cast<InnerPlugin *>(l->ctx)->convertedList_.size(); },
+		.get = [](const clap_input_events *l, uint32_t i) -> const clap_event_header * {
+			auto &list = static_cast<InnerPlugin *>(l->ctx)->convertedList_;
+			return i < list.size() ? list[i] : nullptr;
+		},
+	};
+
 	active_ = plugin_->activate(plugin_, sampleRate, minFrames, maxFrames);
 	return active_;
+}
+
+// Audio thread. Rewrites note on/off between the CLAP and MIDI dialects into preallocated storage; every other
+// event is passed by pointer. Never allocates: past kMaxConvertedEvents further events are dropped.
+const clap_input_events *InnerPlugin::convertNotes(const clap_input_events *in) {
+	if (noteConversion_ == NoteConversion::None || !in) return in;
+	convertedList_.clear();
+	convertedMidi_.clear();
+	convertedNotes_.clear();
+	const uint32_t count = in->size(in);
+	for (uint32_t i = 0; i < count && convertedList_.size() < kMaxConvertedEvents; ++i) {
+		const clap_event_header *h = in->get(in, i);
+		if (!h) continue;
+		const bool core = h->space_id == CLAP_CORE_EVENT_SPACE_ID;
+		if (core && noteConversion_ == NoteConversion::ClapToMidi &&
+		    (h->type == CLAP_EVENT_NOTE_ON || h->type == CLAP_EVENT_NOTE_OFF)) {
+			auto *n = reinterpret_cast<const clap_event_note *>(h);
+			if (n->key < 0 || n->key > 127) continue; // wildcard notes have no MIDI equivalent
+			const bool on = h->type == CLAP_EVENT_NOTE_ON;
+			const int channel = n->channel < 0 ? 0 : (n->channel & 0x0f);
+			const int velocity = std::clamp(int(std::lround(n->velocity * 127.0)), on ? 1 : 0, 127);
+			clap_event_midi m{};
+			m.header = {sizeof(m), h->time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, h->flags};
+			m.port_index = n->port_index < 0 ? 0 : uint16_t(n->port_index);
+			m.data[0] = uint8_t((on ? 0x90 : 0x80) | channel);
+			m.data[1] = uint8_t(n->key);
+			m.data[2] = uint8_t(velocity);
+			convertedMidi_.push_back(m);
+			convertedList_.push_back(&convertedMidi_.back().header);
+			continue;
+		}
+		if (core && noteConversion_ == NoteConversion::MidiToClap && h->type == CLAP_EVENT_MIDI) {
+			auto *m = reinterpret_cast<const clap_event_midi *>(h);
+			const uint8_t status = m->data[0] & 0xf0;
+			if (status == 0x90 || status == 0x80) {
+				const bool on = status == 0x90 && m->data[2] > 0;
+				clap_event_note n{};
+				n.header = {sizeof(n), h->time, CLAP_CORE_EVENT_SPACE_ID, uint16_t(on ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF),
+				            h->flags};
+				n.note_id = -1;
+				n.port_index = int16_t(m->port_index);
+				n.channel = int16_t(m->data[0] & 0x0f);
+				n.key = int16_t(m->data[1] & 0x7f);
+				n.velocity = double(m->data[2] & 0x7f) / 127.0;
+				convertedNotes_.push_back(n);
+				convertedList_.push_back(&convertedNotes_.back().header);
+				continue;
+			}
+		}
+		convertedList_.push_back(h);
+	}
+	return &convertedEvents_;
 }
 
 void InnerPlugin::deactivate() {
@@ -358,7 +440,7 @@ clap_process_status InnerPlugin::process(const float *const *in, uint32_t inChan
 		.audio_outputs = outBufs_.data(),
 		.audio_inputs_count = (uint32_t)inBufs_.size(),
 		.audio_outputs_count = (uint32_t)outBufs_.size(),
-		.in_events = inEvents,
+		.in_events = convertNotes(inEvents),
 		.out_events = outEvents,
 	};
 	auto status = plugin_->process(plugin_, &proc);

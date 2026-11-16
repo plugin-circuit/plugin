@@ -18,6 +18,8 @@
 #include <clap/clap.h>
 
 #include <array>
+#include <bitset>
+#include <chrono>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -43,14 +45,16 @@ public:
 	void uiUnload();
 	void uiSetMacro(uint32_t slot, double normalized, int gesture); // gesture: 0 none, 1 begin, 2 end
 	void uiSetParam(clap_id id, double value);
-	void uiNote(int16_t key, double velocity, bool on); // on-screen keyboard (instruments)
+	void uiNote(int16_t key, double velocity, bool on); // on-screen keyboard
+	void uiAllNotesOff(); // releases every note the UI still holds (editor closed or hidden, plugin swapped)
 	void uiMapMacro(uint32_t slot, clap_id paramId, double minValue, double maxValue, bool add);
 	void uiUnmapMacro(uint32_t slot, int64_t paramId); // -1 clears all targets
 	void uiRenameMacro(uint32_t slot, const std::string &name);
 	void uiAutoMap();
+	void uiSetTransport(bool playing); // the fallback transport, used only when the host sends none
 	bool isInstrument() const { return instrument_; }
 	InnerPlugin *innerForGui(); // main thread: the current inner plugin, or nullptr
-	void requestHostResize(uint32_t w, uint32_t h);
+	bool requestHostResize(uint32_t w, uint32_t h); // false: the host refused, keep the current size
 	void housekeeping(); // main thread: finish loads, free retired objects
 
 private:
@@ -111,7 +115,8 @@ private:
 	void publishMacros(MacroMap map);
 	void applyHostState(InnerPlugin &inner, const HostState &state);
 	InnerHostCallbacks makeInnerCallbacks();
-	void translateEvents(const clap_input_events *in, Slot *slot, const MacroMap *map, bool drainUi);
+	// drainUi: macro/param/gesture UI events; drainNotes: UI notes (only real process blocks, never params flush)
+	void translateEvents(const clap_input_events *in, Slot *slot, const MacroMap *map, bool drainUi, bool drainNotes);
 	void passThrough(const clap_process *process);
 	void lockInner();
 	void unlockInner() { innerLock_.clear(std::memory_order_release); }
@@ -149,10 +154,24 @@ private:
 	std::vector<std::pair<uint64_t, std::unique_ptr<MacroMap>>> retiredMacros_;
 	std::array<std::atomic<double>, kNumMacros> macroValues_{};
 	std::atomic<uint64_t> processEpoch_{0};
+	// Hosts without a transport (clap-wrapper's standalone passes none): our own 120 bpm 4/4 transport, started
+	// and stopped from the host UI, so sequencer-driven instruments can play. Starts stopped, so grooveboxes don't
+	// run on their own. fallbackTransport_ / fallbackSamples_ are audio-thread only.
+	clap_event_transport fallbackTransport_{};
+	int64_t fallbackSamples_ = 0;
+	std::atomic<bool> fallbackPlaying_{false}, fallbackRewind_{false}, hostHasTransport_{true};
+	const clap_event_transport *transportFor(const clap_process *p);
 
 	// UI -> audio events
 	choc::fifo::SingleReaderSingleWriterFIFO<UiEvent> uiEvents_;
+	choc::fifo::SingleReaderSingleWriterFIFO<UiEvent> uiNotes_; // own queue: parameter flushes never drain notes
 	std::mutex uiPushMutex_; // UI pushes come from the main thread only, but keep pushes serialised
+	std::bitset<128> uiHeldNotes_; // main thread: notes the UI has started and not yet released
+
+	// installed packages for the snapshot: a disk scan, so cached (main thread)
+	std::vector<CatalogPlugin> installedCache_;
+	std::chrono::steady_clock::time_point installedAt_{};
+	const std::vector<CatalogPlugin> &installedPlugins();
 
 	// per-block event storage (audio thread)
 	struct EventBuffer {

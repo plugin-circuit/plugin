@@ -73,6 +73,8 @@ public:
 	const clap_plugin_gui *gui() const { return gui_; }
 	bool hasNoteInput() const { return noteInputPorts_ > 0; }
 	bool supportsMpe() const { return mpe_; } // a note input declares the MIDI-MPE dialect
+	uint32_t noteDialects() const { return noteDialects_; }       // supported dialects of note input port 0
+	uint32_t preferredNoteDialect() const { return preferredDialect_; }
 	uint32_t mainInputChannels() const { return mainInChannels_; }
 	uint32_t mainOutputChannels() const { return mainOutChannels_; }
 
@@ -113,6 +115,18 @@ private:
 	std::vector<uint32_t> inPortChannels_, outPortChannels_;
 	uint32_t mainInPort_ = 0, mainOutPort_ = 0, mainInChannels_ = 0, mainOutChannels_ = 0, noteInputPorts_ = 0;
 	bool mpe_ = false;
+	uint32_t noteDialects_ = 0, preferredDialect_ = 0;
+
+	// Note-dialect conversion for inner plugins that accept only one of CLAP notes / MIDI (port 0's dialects).
+	// Preallocated in activate(); used on the audio thread only.
+	enum class NoteConversion { None, ClapToMidi, MidiToClap };
+	NoteConversion noteConversion_ = NoteConversion::None;
+	static constexpr size_t kMaxConvertedEvents = 4096;
+	std::vector<const clap_event_header *> convertedList_;
+	std::vector<clap_event_midi> convertedMidi_;
+	std::vector<clap_event_note> convertedNotes_;
+	clap_input_events convertedEvents_{};
+	const clap_input_events *convertNotes(const clap_input_events *in);
 	uint32_t maxFrames_ = 0;
 	std::vector<std::vector<float>> scratch_;          // one per channel of every port
 	std::vector<std::vector<float *>> inPtrs_, outPtrs_; // per port

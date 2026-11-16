@@ -7,6 +7,9 @@
 
 namespace plugincircuit {
 
+// Upper bound for an inflated bundle archive (the largest in the catalog today is 89 MB): stops a gzip bomb.
+constexpr size_t kMaxInflatedBytes = size_t(1) << 30;
+
 static bool gunzip(const std::vector<uint8_t> &in, std::vector<uint8_t> &out, std::string &error) {
 	// Parse the gzip header (RFC 1952) ourselves and inflate the raw deflate payload.
 	if (in.size() < 18 || in[0] != 0x1f || in[1] != 0x8b || in[2] != 8) {
@@ -32,6 +35,10 @@ static bool gunzip(const std::vector<uint8_t> &in, std::vector<uint8_t> &out, st
 			inflater.read(chunk.data(), (std::streamsize)chunk.size());
 			auto n = inflater.gcount();
 			if (n <= 0) break;
+			if (out.size() + size_t(n) > kMaxInflatedBytes) {
+				error = "gzip: archive inflates to more than 1 GiB";
+				return false;
+			}
 			out.insert(out.end(), chunk.data(), chunk.data() + n);
 		}
 	} catch (const std::exception &e) {

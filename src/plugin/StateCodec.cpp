@@ -1,5 +1,8 @@
 #include "plugin/StateCodec.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <choc/text/choc_JSON.h>
 
 #include <cstring>
@@ -82,6 +85,13 @@ std::optional<HostState> decodeState(const std::vector<uint8_t> &in, std::string
 	HostState s;
 	s.innerState.assign(in.begin() + (long)pos, in.begin() + (long)(pos + innerSize));
 	try {
+		// Untrusted input: macro values are normalised, ids must be integral clap_ids (casting anything else is UB).
+		auto unit = [](double v) { return std::isfinite(v) ? std::clamp(v, 0.0, 1.0) : 0.0; };
+		auto paramId = [](double v, clap_id &out) {
+			if (!std::isfinite(v) || v < 0 || v >= double(CLAP_INVALID_ID) || v != std::floor(v)) return false;
+			out = clap_id(v);
+			return true;
+		};
 		auto j = choc::json::parse(text);
 		s.pluginId = str(j, "pluginId");
 		s.pluginName = str(j, "pluginName");
@@ -97,12 +107,12 @@ std::optional<HostState> decodeState(const std::vector<uint8_t> &in, std::string
 				Macro &macro = s.macros.macros[i];
 				macro.name = str(m, "name");
 				macro.customName = m.hasObjectMember("custom") && m["custom"].isBool() && m["custom"].getBool();
-				macro.defaultValue = num(m, "default");
-				s.macroValues[i] = num(m, "value");
+				macro.defaultValue = unit(num(m, "default"));
+				s.macroValues[i] = unit(num(m, "value"));
 				if (m.hasObjectMember("targets") && m["targets"].isArray()) {
 					for (auto t : m["targets"]) {
 						MacroTarget target;
-						target.paramId = (clap_id)num(t, "id");
+						if (!paramId(num(t, "id", -1), target.paramId)) continue;
 						target.minValue = num(t, "min");
 						target.maxValue = num(t, "max", 1);
 						target.stepped = t.hasObjectMember("stepped") && t["stepped"].isBool() && t["stepped"].getBool();
@@ -112,7 +122,11 @@ std::optional<HostState> decodeState(const std::vector<uint8_t> &in, std::string
 			}
 		}
 		if (j.hasObjectMember("innerParams") && j["innerParams"].isArray())
-			for (auto p : j["innerParams"]) s.innerParams[(clap_id)num(p, "id")] = num(p, "v");
+			for (auto p : j["innerParams"]) {
+				clap_id id = CLAP_INVALID_ID;
+				const double v = num(p, "v");
+				if (paramId(num(p, "id", -1), id) && std::isfinite(v)) s.innerParams[id] = v;
+			}
 	} catch (const std::exception &e) {
 		error = std::string("state JSON: ") + e.what();
 		return std::nullopt;

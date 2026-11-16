@@ -249,7 +249,7 @@ index cfac35c..410c85f 100644
 +					decoded += *c;
 +				}
 +			}
-+			if (decoded.find("..") != std::string::npos) return false; // stay inside the mounted dirs
++			if (("/" + decoded + "/").find("/../") != std::string::npos) return false; // no ".." path components
 +			auto mapped = module.instanceGroup->mapPath(decoded);
  			if (!mapped) return false;
  			for (size_t i = 0; i < mapped->size(); ++i) {

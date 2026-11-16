@@ -84,7 +84,11 @@ button.icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; s
 button.icon.small { width: 26px; height: 26px; }
 body:not(.has-plugin) #unload, body:not(.has-plugin) #openCatalog { display: none; }
 body:not([data-view="browse"]) #refreshCatalog, body.offline #refreshCatalog { display: none; }
-body:not(.instrument) #kbdToggle { display: none; }
+body:not(.accepts-notes) #kbdToggle { display: none; }
+body:not(.own-transport) #transportToggle { display: none; }
+#transportToggle .stop, #transportToggle[aria-pressed="true"] .play { display: none; }
+#transportToggle[aria-pressed="true"] .stop { display: inline; }
+#transportToggle[aria-pressed="true"] { color: var(--c-bg); background: var(--c-text); }
 #kbdToggle[aria-pressed="true"] { color: var(--c-bg); background: var(--c-text); }
 
 /* ---- views ---- */

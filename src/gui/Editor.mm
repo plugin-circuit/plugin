@@ -45,8 +45,10 @@ struct Editor::Impl {
 	uint32_t innerW = 0, innerH = 0;
 	uint32_t keyboardHeight = 0; // on-screen keyboard strip at the bottom (instruments), drawn by the web UI
 	static constexpr uint32_t kKeyboardHeight = 112;
+	static constexpr uint32_t kMinWidth = 640, kMinHeight = 420; // adjustSize's limits
 	uint64_t lastVersion = 0;
 	bool pageReady = false;
+	id keyMonitor = nil; // copies note keys typed into the inner plugin's GUI to the on-screen keyboard
 
 	explicit Impl(PluginCircuitPlugin &p) : plugin(p) {}
 
@@ -96,10 +98,15 @@ struct Editor::Impl {
 		if (!innerGuiCreated || innerW == 0 || innerH == 0) return;
 		uint32_t w = std::max<uint32_t>(innerW, 760), h = innerH + Editor::headerHeight + keyboardHeight;
 		if (w != width || h != height) {
+			const uint32_t oldW = width, oldH = height;
 			width = w;
 			height = h;
 			layout();
-			plugin.requestHostResize(w, h);
+			if (!plugin.requestHostResize(w, h)) { // refused: keep the window, the inner GUI is scaled/centred instead
+				width = oldW;
+				height = oldH;
+				layout();
+			}
 		}
 	}
 
@@ -144,10 +151,13 @@ struct Editor::Impl {
 	void setKeyboard(bool open) {
 		uint32_t kb = open ? kKeyboardHeight : 0;
 		if (kb == keyboardHeight) return;
-		height = height - keyboardHeight + kb; // grow the window rather than squeeze the plugin's GUI
+		if (!open) plugin.uiAllNotesOff();
+		// grow the window rather than squeeze the plugin's GUI; if the host refuses, the strip takes the space
+		const uint32_t oldH = height;
+		height = std::max<uint32_t>(height - keyboardHeight + kb, kMinHeight);
 		keyboardHeight = kb;
+		if (height != oldH && !plugin.requestHostResize(width, height)) height = oldH;
 		layout();
-		plugin.requestHostResize(width, height);
 	}
 
 	void setView(const std::string &v) {
@@ -268,6 +278,8 @@ struct Editor::Impl {
 			plugin.uiSetMacro((uint32_t)num("slot"), num("value"), (int)num("gesture"));
 		} else if (method == "note") {
 			plugin.uiNote((int16_t)num("key", -1), num("velocity", 0.8), num("on") != 0);
+		} else if (method == "transport") {
+			plugin.uiSetTransport(num("playing") != 0);
 		} else if (method == "keyboard") {
 			setKeyboard(num("open") != 0);
 		} else if (method == "setParam") {
@@ -325,6 +337,11 @@ struct Editor::Impl {
 		view = plugin.innerForGui() ? "plugin" : "browse";
 		if (std::getenv("PLUGINCIRCUIT_DEBUG_UI")) std::fprintf(stderr, "[plugincircuit] editor created, view %s\n", view.c_str());
 		if (view == "plugin") createInnerGui();
+		keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp)
+		                                                      handler:^NSEvent *(NSEvent *e) {
+			                                                      forwardNoteKey(e);
+			                                                      return e;
+		                                                      }];
 		timer = choc::messageloop::Timer(50, [this] {
 			tick();
 			return true;
@@ -332,7 +349,34 @@ struct Editor::Impl {
 		return true;
 	}
 
+	// The inner plugin's GUI is its own view (a WCLAP webview GUI is a WKWebView): once clicked it has the keyboard
+	// focus, and the host page no longer sees key events. While the on-screen keyboard is open, copy the note keys
+	// (by physical position, like the page's e.code mapping) to the page. The event still reaches the inner GUI,
+	// so typing into its text fields keeps working.
+	void forwardNoteKey(NSEvent *e) {
+		if (!keyboardHeight || !web || !pageReady || !container.window || e.window != container.window) return;
+		auto *responder = (NSView *)container.window.firstResponder;
+		if (![responder isKindOfClass:[NSView class]] || ![responder isDescendantOf:innerHolder]) return;
+		const bool down = e.type == NSEventTypeKeyDown;
+		if (down && (e.isARepeat || (e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption))))
+			return;
+		static const std::pair<unsigned short, const char *> kCodes[] = {
+			{0x00, "KeyA"}, {0x0D, "KeyW"}, {0x01, "KeyS"}, {0x0E, "KeyE"}, {0x02, "KeyD"}, {0x03, "KeyF"},
+			{0x11, "KeyT"}, {0x05, "KeyG"}, {0x10, "KeyY"}, {0x04, "KeyH"}, {0x20, "KeyU"}, {0x26, "KeyJ"},
+			{0x28, "KeyK"}, {0x1F, "KeyO"}, {0x25, "KeyL"}, {0x23, "KeyP"}, {0x29, "Semicolon"}, {0x27, "Quote"},
+			{0x06, "KeyZ"}, {0x07, "KeyX"}};
+		for (auto &[keyCode, code] : kCodes)
+			if (e.keyCode == keyCode) {
+				web->evaluateJavascript(std::string("window.plugincircuitHost && window.plugincircuitHost.key && window.plugincircuitHost.key('") +
+				                        code + "', " + (down ? "true" : "false") + ")");
+				return;
+			}
+	}
+
 	~Impl() {
+		if (keyMonitor) [NSEvent removeMonitor:keyMonitor];
+		keyMonitor = nil;
+		plugin.uiAllNotesOff(); // notes held on the on-screen keyboard die with the editor
 		timer = {};
 		destroyInnerGui();
 		web.reset();
@@ -359,13 +403,13 @@ bool Editor::getSize(uint32_t &w, uint32_t &h) {
 	return true;
 }
 bool Editor::adjustSize(uint32_t &w, uint32_t &h) {
-	w = std::max<uint32_t>(w, 640);
-	h = std::max<uint32_t>(h, 420);
+	w = std::max<uint32_t>(w, Impl::kMinWidth);
+	h = std::max<uint32_t>(h, Impl::kMinHeight);
 	return true;
 }
 bool Editor::setSize(uint32_t w, uint32_t h) {
-	impl->width = std::max<uint32_t>(w, 640);
-	impl->height = std::max<uint32_t>(h, 420);
+	impl->width = std::max<uint32_t>(w, Impl::kMinWidth);
+	impl->height = std::max<uint32_t>(h, Impl::kMinHeight);
 	impl->layout();
 	return true;
 }
@@ -381,6 +425,7 @@ bool Editor::show() {
 	return true;
 }
 bool Editor::hide() {
+	impl->plugin.uiAllNotesOff();
 	[impl->container setHidden:YES];
 	return true;
 }

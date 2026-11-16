@@ -94,7 +94,19 @@ bool plugincircuit_fetch(const char *pluginId, const char *sha256, plugincircuit
 plugincircuit_module *plugincircuit_open(const char *bundleDir, char *error, size_t errorCapacity) {
 	if (!bundleDir) return nullptr;
 	std::string err;
-	auto dataDir = Paths::pluginData(fs::path(bundleDir).parent_path().parent_path().filename().string());
+	// Same data dir as the host plugin: keyed by package id (catalog meta), else by the package's sha256 dir.
+	std::string key;
+	std::error_code ec;
+	auto rel = fs::relative(fs::weakly_canonical(bundleDir, ec), fs::weakly_canonical(Paths::packages(), ec), ec);
+	if (!ec && !rel.empty() && *rel.begin() != "..") {
+		const auto sha = rel.begin()->string();
+		for (auto &p : Catalog::installedPlugins())
+			if (p.sha256 == sha) key = p.packageId.empty() ? p.id : p.packageId;
+		if (key.empty()) key = sha;
+	} else {
+		key = fs::path(bundleDir).filename().string(); // outside the cache: a local bundle
+	}
+	auto dataDir = Paths::pluginData(key);
 	auto module = WclapLibrary::open(bundleDir, dataDir.string(), err);
 	if (!module) {
 		setError(error, errorCapacity, err);

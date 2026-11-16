@@ -2,7 +2,7 @@
 // Loads PluginCircuit.clap, activates it, restores a session naming <pluginId> (+ package sha256), waits for the load,
 // checks that Plugin Circuit asked for a restart (so the DAW re-reads latency), restarts, then sends an impulse (FX) or a
 // note-on (instrument) at sample 100 of a block and reports samples until the output responds vs latency.get().
-// Usage: plugincircuit-latency-test <path/to/PluginCircuit.clap> <fx|instrument> <pluginId> <packageSha256>
+// Usage: plugincircuit-latency-test <path/to/PluginCircuit.clap> <fx|synth> <pluginId> <packageSha256>
 #include <clap/clap.h>
 
 #include <algorithm>
@@ -44,17 +44,17 @@ void putU32(std::vector<uint8_t> &b, uint32_t v) {
 
 int main(int argc, char **argv) {
 	if (argc < 5) {
-		std::fprintf(stderr, "usage: %s <PluginCircuit.clap> <fx|instrument> <pluginId> <packageSha256>\n", argv[0]);
+		std::fprintf(stderr, "usage: %s <PluginCircuit.clap> <fx|synth> <pluginId> <packageSha256>\n", argv[0]);
 		return 2;
 	}
-	const bool instrument = std::string(argv[2]) == "instrument";
+	const bool instrument = std::string(argv[2]) == "synth";
 	std::string bin = std::string(argv[1]) + "/Contents/MacOS/PluginCircuit";
 	void *lib = dlopen(bin.c_str(), RTLD_NOW);
 	if (!lib) { std::printf("dlopen: %s\n", dlerror()); return 1; }
 	auto *entry = (const clap_plugin_entry *)dlsym(lib, "clap_entry");
 	entry->init(argv[1]);
 	auto *factory = (const clap_plugin_factory *)entry->get_factory(CLAP_PLUGIN_FACTORY_ID);
-	auto *p = factory->create_plugin(factory, &host, instrument ? "studio.plugincircuit.host.instrument" : "studio.plugincircuit.host.fx");
+	auto *p = factory->create_plugin(factory, &host, instrument ? "studio.plugincircuit.host.synth" : "studio.plugincircuit.host.fx");
 	p->init(p);
 	auto *state = (const clap_plugin_state *)p->get_extension(p, CLAP_EXT_STATE);
 	auto *latency = (const clap_plugin_latency *)p->get_extension(p, CLAP_EXT_LATENCY);
@@ -124,12 +124,14 @@ int main(int argc, char **argv) {
 	uint32_t reported = latency->get(p);
 
 	constexpr uint32_t kAt = 100;
+	float settlePeak = 0; // output with no input and no host transport (a standalone with nothing playing)
 	for (int b = 0; b < int(4 * sr / frames); ++b) { // settle
 		Events none;
 		std::fill(inL.begin(), inL.end(), 0.f);
 		std::fill(inR.begin(), inR.end(), 0.f);
 		process(none);
 		pump();
+		for (uint32_t i = 0; i < frames; ++i) settlePeak = std::max({settlePeak, std::fabs(outL[i]), std::fabs(outR[i])});
 	}
 	float floor = 0;
 	for (uint32_t i = 0; i < frames; ++i) floor = std::max({floor, std::fabs(outL[i]), std::fabs(outR[i])});
@@ -157,8 +159,8 @@ int main(int argc, char **argv) {
 		for (uint32_t i = (b == 0 ? kAt : 0); i < frames && delay < 0; ++i)
 			if (std::fabs(outL[i]) > threshold || std::fabs(outR[i]) > threshold) delay = int64_t(b) * frames + i - kAt;
 	}
-	std::printf("{\"plugin\":\"%s\",\"restartRequested\":%s,\"latencyBeforeRestart\":%u,\"reportedLatency\":%u,\"measuredDelay\":%lld}\n",
-	            argv[3], restart ? "true" : "false", latencyWhileActive, reported, (long long)delay);
+	std::printf("{\"plugin\":\"%s\",\"restartRequested\":%s,\"latencyBeforeRestart\":%u,\"reportedLatency\":%u,\"measuredDelay\":%lld,\"settlePeak\":%g}\n",
+	            argv[3], restart ? "true" : "false", latencyWhileActive, reported, (long long)delay, double(settlePeak));
 	p->stop_processing(p);
 	p->deactivate(p);
 	p->destroy(p);

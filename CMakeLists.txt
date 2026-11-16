@@ -41,7 +41,9 @@ FetchContent_Declare(wclap-bridge
 	GIT_TAG cd11d22afbe2af350f24cd56e6e0536e5ca86452
 	GIT_SUBMODULES_RECURSE ON
 	# fixes: init the WCLAP before querying its extensions; enable the wasm exceptions proposal
-	PATCH_COMMAND sh -c "git apply --reverse --check ${CMAKE_CURRENT_SOURCE_DIR}/patches/wclap-bridge.patch 2>/dev/null || git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/wclap-bridge.patch"
+	# webview-gui is a submodule, so its fix is a patch of its own, applied inside it. Each apply is skipped when the
+	# patch is already in (a re-configure).
+	PATCH_COMMAND sh -c "(git apply --reverse --check ${CMAKE_CURRENT_SOURCE_DIR}/patches/wclap-bridge.patch 2>/dev/null || git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/wclap-bridge.patch) && cd modules/webview-gui && (git apply --reverse --check ${CMAKE_CURRENT_SOURCE_DIR}/patches/webview-gui.patch 2>/dev/null || git apply ${CMAKE_CURRENT_SOURCE_DIR}/patches/webview-gui.patch)"
 	UPDATE_DISCONNECTED ON
 	SOURCE_SUBDIR do-not-add) # added manually below, after clap-wrapper
 FetchContent_MakeAvailable(wclap-bridge)
@@ -124,7 +126,7 @@ make_clapfirst_plugins(
 	COPY_AFTER_BUILD FALSE
 	ASSET_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins
 	STANDALONE_CONFIGURATIONS
-		standalone "PluginCircuit" "studio.plugincircuit.host.instrument")
+		standalone "PluginCircuit" "studio.plugincircuit.host.synth")
 
 endif()
 

@@ -30,17 +30,26 @@ window.plugincircuitHost = {
   update(s) {
     const full = Array.isArray(s.macros);
     if (full) state.snap = s;
-    else if (state.snap) Object.assign(state.snap, { status: s.status, message: s.message, progress: s.progress, version: s.version });
+    else if (state.snap) Object.assign(state.snap, { status: s.status, message: s.message, progress: s.progress, version: s.version,
+      hostTransport: s.hostTransport, transportPlaying: s.transportPlaying });
     s.macroValues.forEach((v, i) => { if (!state.dragging.has("m" + i)) state.values[i] = v; });
     for (const pv of s.paramValues) if (!state.dragging.has("p" + pv.id)) state.paramValues.set(pv.id, pv);
-    if (s.view && (s.view !== state.view || !state.initialised)) { state.initialised = true; setView(s.view, false); }
-    if (typeof s.keyboard === "boolean") showKeyboard(s.keyboard, false);
+    if (s.view && (s.view !== state.view || !state.initialised) && !recentlyChanged("view")) { state.initialised = true; setView(s.view, false); }
+    if (typeof s.keyboard === "boolean" && !recentlyChanged("keyboard")) showKeyboard(s.keyboard, false);
+    if (recentlyChanged("transport") && state.snap) state.snap.transportPlaying = state.localTransport;
     render(full);
   },
 };
 
+// Snapshots are built natively and delivered asynchronously, so one built before a click can arrive after it.
+// For a short while after a local change, snapshot values for that field are ignored.
+const localChanges = new Map();
+const markLocal = (field) => localChanges.set(field, performance.now());
+const recentlyChanged = (field) => performance.now() - (localChanges.get(field) ?? -1e9) < 400;
+
 // ---------------------------------------------------------------- views
 function setView(view, tellHost = true) {
+  if (tellHost) markLocal("view");
   state.view = view;
   document.body.dataset.view = view;
   for (const b of document.querySelectorAll(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.view === view));
@@ -84,7 +93,11 @@ function render(full) {
   const loading = ["fetching", "downloading", "compiling"].includes(s.status);
   document.body.classList.toggle("has-plugin", !!plugin);
   document.body.classList.toggle("instrument", !!s.instrument);
-  if (!s.instrument && kbd.open) showKeyboard(false);
+  const acceptsNotes = !!(plugin && plugin.noteInput);
+  document.body.classList.toggle("accepts-notes", acceptsNotes);
+  if (!acceptsNotes && kbd.open) showKeyboard(false);
+  document.body.classList.toggle("own-transport", !!plugin && s.hostTransport === false);
+  $("transportToggle").setAttribute("aria-pressed", String(!!s.transportPlaying));
   document.body.classList.toggle("loading", loading);
   document.body.classList.toggle("missing", !loading && (s.status === "missing" || s.status === "error") && !plugin);
 
@@ -128,8 +141,9 @@ function render(full) {
   }
 
   $("noGui").style.display = plugin && !s.innerGui ? "" : "none";
-  if (full) { renderPages(); renderKnobs(); renderParams(); }
-  else { updateKnobs(); updateParams(); }
+  // A rebuild would remove the element being dragged (its pointerup would never arrive): wait for the drag to end.
+  if (full && state.dragging.size === 0) { state.pendingRebuild = false; renderPages(); renderKnobs(); renderParams(); }
+  else { if (full) state.pendingRebuild = true; updateKnobs(); updateParams(); }
 }
 
 // loader: 24 pixel blocks; downloading fills them in order, the other phases run a wave
@@ -245,14 +259,21 @@ function bindDrag(target, key, get, set, axis, reset) {
         set(Math.min(1, Math.max(0, (pos - rect.left) / rect.width)), 0);
       }
     };
+    let ended = false;
     const up = () => {
+      if (ended) return;
+      ended = true;
       target.removeEventListener("pointermove", move);
       set(get(), 2);
-      setTimeout(() => state.dragging.delete(key), 120);
+      setTimeout(() => {
+        state.dragging.delete(key);
+        if (state.dragging.size === 0 && state.pendingRebuild) render(true);
+      }, 120);
     };
     target.addEventListener("pointermove", move);
     target.addEventListener("pointerup", up, { once: true });
     target.addEventListener("pointercancel", up, { once: true });
+    target.addEventListener("lostpointercapture", up, { once: true });
   });
   if (reset) target.addEventListener("dblclick", reset);
 }
@@ -415,17 +436,21 @@ $("retryLoad").onclick = () => {
   const m = state.snap && state.snap.missing;
   if (m) call("load", { pluginId: m.id, sha256: m.sha256 || "" });
 };
+// Text entry only: the velocity slider is an <input type=range> and must not swallow note keys.
+const isTextEntry = (el) => el instanceof Element && el.matches("input:not([type=range]):not([type=checkbox]), select, textarea, [contenteditable]");
 document.addEventListener("keydown", (e) => {
-  if (e.target.matches("input, select")) return;
+  if (isTextEntry(e.target)) return;
   const keys = { 1: "plugin", 2: "macros", 3: "params", 4: "browse" };
   if ((e.metaKey || e.ctrlKey) && keys[e.key]) { e.preventDefault(); setView(keys[e.key]); return; }
   if ((e.metaKey || e.ctrlKey) && e.key === "r" && state.view === "browse") { e.preventDefault(); ensurePicker(true); return; }
-  if ((e.metaKey || e.ctrlKey) && e.key === "k" && document.body.classList.contains("instrument")) { e.preventDefault(); showKeyboard(!kbd.open); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key === "k" && document.body.classList.contains("accepts-notes")) { e.preventDefault(); userToggleKeyboard(); return; }
   if (!e.metaKey && !e.ctrlKey && !e.altKey) kbdKey(e, true);
 });
 
 document.addEventListener("keyup", (e) => kbdKey(e, false));
 window.addEventListener("blur", () => kbd.allOff());
+window.addEventListener("pagehide", () => kbd.allOff());
+document.addEventListener("visibilitychange", () => { if (document.hidden) kbd.allOff(); });
 
 // ---------------------------------------------------------------- on-screen keyboard (instruments)
 // Notes go to the plugin through plugincircuitCall("note") -> the lock-free UI queue -> the next process block.
@@ -449,13 +474,16 @@ const kbd = {
     call("note", { key, on: 0, velocity: 0 });
     paintKey(key, false);
   },
-  allOff() { for (const key of [...this.down.keys()]) this.noteOff(key); },
+  allOff() { heldCodes.clear(); for (const key of [...this.down.keys()]) this.noteOff(key); },
 };
 
 const NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const isBlack = (k) => [1, 3, 6, 8, 10].includes(k % 12);
-// computer keys: one octave plus a fifth from the left edge of the keyboard, like most DAWs
-const LETTERS = "awsedftgyhujkolp;'";
+// computer keys: one octave plus a fifth from the left edge of the keyboard, like most DAWs. Mapped by physical
+// position (KeyboardEvent.code), so Shift/Option and non-US layouts don't change which note a key plays or releases.
+const NOTE_CODES = ["KeyA", "KeyW", "KeyS", "KeyE", "KeyD", "KeyF", "KeyT", "KeyG", "KeyY", "KeyH", "KeyU", "KeyJ",
+  "KeyK", "KeyO", "KeyL", "KeyP", "Semicolon", "Quote"];
+const heldCodes = new Map(); // code -> the key it started, so a release matches its press across octave shifts
 
 function buildKeys() {
   const box = $("keys");
@@ -508,19 +536,36 @@ $("keys").addEventListener("pointerup", release);
 $("keys").addEventListener("pointercancel", release);
 
 function kbdKey(e, down) {
-  if (!kbd.open || e.repeat || e.target.matches("input, select, textarea")) return;
-  const ch = e.key.toLowerCase();
-  if (down && (ch === "z" || ch === "x")) { shiftOctave(ch === "z" ? -1 : 1); return; }
-  const i = LETTERS.indexOf(ch);
-  if (i < 0) return;
-  e.preventDefault();
-  const key = kbd.base + i;
-  if (down) kbd.noteOn(key, ch);
-  else kbd.noteOff(key);
+  if (!down) { // a release always ends the note its key started, whatever has focus or modifiers now
+    if (heldCodes.has(e.code)) { e.preventDefault(); kbdCode(e.code, false); }
+    return;
+  }
+  if (!kbd.open || e.repeat || isTextEntry(e.target)) return;
+  if (kbdCode(e.code, true)) e.preventDefault();
 }
+// also called natively when the plugin's own GUI has the keyboard focus (Editor::forwardNoteKey)
+function kbdCode(code, down) {
+  if (!down) {
+    const key = heldCodes.get(code);
+    if (key === undefined) return false;
+    heldCodes.delete(code);
+    kbd.noteOff(key);
+    return true;
+  }
+  if (!kbd.open || heldCodes.has(code)) return false;
+  if (code === "KeyZ" || code === "KeyX") { shiftOctave(code === "KeyZ" ? -1 : 1); return true; }
+  const i = NOTE_CODES.indexOf(code);
+  if (i < 0) return false;
+  const key = kbd.base + i;
+  if (key > 127) return false;
+  heldCodes.set(code, key);
+  kbd.noteOn(key, code);
+  return true;
+}
+window.plugincircuitHost.key = (code, down) => kbdCode(code, down);
 
 function shiftOctave(d) {
-  const base = Math.min(96, Math.max(0, kbd.base + d * 12));
+  const base = Math.min(127 - kbd.octaves * 12 - (127 - kbd.octaves * 12) % 12, Math.max(0, kbd.base + d * 12)); // top key <= 127
   if (base === kbd.base) return;
   kbd.allOff();
   kbd.base = base;
@@ -538,7 +583,18 @@ function showKeyboard(open, tellHost = true) {
   if (open) buildKeys();
   if (tellHost) call("keyboard", { open: open ? 1 : 0 });
 }
-$("kbdToggle").onclick = () => showKeyboard(!kbd.open);
+// user toggles: guard them against stale snapshots (automatic closes, e.g. no note input, are not guarded)
+const userToggleKeyboard = () => { markLocal("keyboard"); showKeyboard(!kbd.open); };
+$("kbdToggle").onclick = userToggleKeyboard;
+function toggleTransport() {
+  const playing = !(state.snap && state.snap.transportPlaying);
+  if (state.snap) state.snap.transportPlaying = playing;
+  state.localTransport = playing;
+  markLocal("transport");
+  $("transportToggle").setAttribute("aria-pressed", String(playing));
+  call("transport", { playing: playing ? 1 : 0 });
+}
+$("transportToggle").onclick = toggleTransport;
 
 document.body.dataset.view = "browse";
 call("ready");

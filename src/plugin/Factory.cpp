@@ -1,4 +1,4 @@
-// The plugin factory: Plugin Circuit FX and Plugin Circuit Instrument, plus clap-wrapper's VST3/AUv2 hints.
+// The plugin factory: Plugin Circuit FX and Plugin Circuit Synth, plus clap-wrapper's VST3/AUv2 hints.
 #include "plugin/PluginCircuitPlugin.h"
 
 #include <clapwrapper/auv2.h>
@@ -31,7 +31,7 @@ const clap_plugin_factory_as_auv2 auv2Factory = {
 	.get_auv2_info = [](const clap_plugin_factory_as_auv2 *, uint32_t index, clap_plugin_info_as_auv2 *info) {
 		if (index >= 2) return false;
 		std::strncpy(info->au_type, index == 1 ? "aumu" : "aufx", 5);
-		std::strncpy(info->au_subt, index == 1 ? "PcIn" : "PcFx", 5);
+		std::strncpy(info->au_subt, index == 1 ? "PcSy" : "PcFx", 5);
 		return true;
 	},
 };

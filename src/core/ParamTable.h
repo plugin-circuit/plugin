@@ -39,6 +39,8 @@ public:
 	}
 
 	size_t size() const { return infos_.size(); }
+	// Unique per table ever built: a new table may reuse a freed one's address, never its generation.
+	uint64_t generation() const { return generation_; }
 	const std::vector<ParamInfo> &infos() const { return infos_; }
 	const ParamInfo &info(size_t index) const { return infos_[index]; }
 
@@ -115,6 +117,10 @@ private:
 	std::unique_ptr<std::atomic<uint64_t>[]> changed_;
 	std::unique_ptr<std::atomic<Owner>[]> owners_;
 	size_t words_ = 0;
+	uint64_t generation_ = [] {
+		static std::atomic<uint64_t> next{1};
+		return next.fetch_add(1, std::memory_order_relaxed);
+	}();
 };
 
 } // namespace plugincircuit

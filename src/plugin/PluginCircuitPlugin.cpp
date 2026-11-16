@@ -926,7 +926,10 @@ void PluginCircuitPlugin::uiEdit(bool macro, uint32_t id, double value, Phase ph
 		value = value < 0 ? 0 : (value > 1 ? 1 : value);
 	}
 	std::lock_guard<std::mutex> lock(uiPushMutex_);
-	uiEvents_.push({macro ? UiEvent::Macro : UiEvent::Param, phase, id, value});
+	// queue full (nothing processes or flushes): a lost end would leave the parameter ours for good, so close
+	// the UI's gestures at the next process / flush instead
+	if (!uiEvents_.push({macro ? UiEvent::Macro : UiEvent::Param, phase, id, value}) && phase == Phase::End)
+		gestures_.requestCloseUi();
 	if (!processing_ && hostParams_) hostParams_->request_flush(host_);
 }
 

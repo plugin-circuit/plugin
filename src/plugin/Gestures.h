@@ -32,9 +32,12 @@ public:
 	};
 
 	// Call at the start of every process / flush with the current table: a new table (a plugin loaded, unloaded or
-	// rescanned) has no owners, so every gesture still open on a macro is closed.
+	// rescanned) has no owners, so every gesture still open on a macro is closed. Compared by generation: a new
+	// table can sit at a freed one's address.
 	void begin(ParamTable *table, Sink &sink) {
-		if (table != table_) {
+		const uint64_t generation = table ? table->generation() : 0;
+		if (generation != generation_) {
+			generation_ = generation;
 			table_ = table;
 			closeMacros(Owner::None, sink);
 		}
@@ -179,6 +182,7 @@ private:
 	}
 
 	ParamTable *table_ = nullptr;
+	uint64_t generation_ = 0;
 	std::array<std::atomic<Owner>, kNumMacros> macroOwner_{};
 	std::atomic<uint8_t> closeRequested_{0};
 };

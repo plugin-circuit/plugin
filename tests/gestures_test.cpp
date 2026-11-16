@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <functional>
+#include <new>
 #include <set>
 #include <sstream>
 #include <string>
@@ -156,6 +157,13 @@ int main() {
 	    {"close UI only keeps the plugin's gesture", pluginOwns, [](World &w) { w.g.requestCloseUi(); w.g.begin(&w.table, w.r); }, "", 10, Owner::Plugin, 0},
 	    {"reset / deactivate -> every gesture closed", pluginOwns, [](World &w) { w.g.requestCloseAll(); w.g.begin(&w.table, w.r); }, "E0", 10, Owner::None, 0},
 	    {"plugin unloaded (new table) -> macro gestures closed", uiOwns, [](World &w) { w.g.begin(nullptr, w.r); }, "E0", 10, Owner::Ui, 50},
+	    {"a new table at the old one's address -> macro gestures closed", uiOwns,
+	     [](World &w) { // rebuild in place: same address, new generation
+		     auto infos = w.table.infos();
+		     w.table.~ParamTable();
+		     new (&w.table) ParamTable(infos);
+		     w.g.begin(&w.table, w.r);
+	     }, "E0", 10, Owner::None, 0},
 	};
 	for (auto &c : cases) run(c);
 

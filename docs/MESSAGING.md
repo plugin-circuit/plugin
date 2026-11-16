@@ -29,6 +29,147 @@ Competing writers during a gesture: like a DAW's touch mode, the gesture owner w
 automation events for it and the WCLAP's own changes to it are dropped until the gesture ends. Other parameters are
 unaffected.
 
+## The single source of truth: the core's parameter table
+
+The core keeps one table for the loaded plugin: every WCLAP parameter plus the 64 macros. It's built on load and
+rebuilt on `rescan(INFO|ALL)`, preallocated, and the audio thread is its only writer. That is how CLAP expects a host
+to work: it learns values from the events it sends and receives, and asks the plugin (`get_value`) only after a load,
+a state load or a `rescan(VALUES)`.
+
+| Per parameter | Written by | Read by |
+| --- | --- | --- |
+| `info` (name, range, flags, module): cached `get_info` | main thread, on load / `rescan(INFO)` | UI, macro mapping, the DAW's `get_info` of macros |
+| `value` (atomic double) | audio thread: every value it applies (from the UI queue, the DAW's events, the WCLAP's output events) | main thread (UI pushes, the DAW's `get_value`) |
+| `owner` (none / UI / plugin) and the gesture | audio thread | audio thread (dropping competing writers), main thread (no echo to the owner) |
+| `changed` bit (preallocated bitset) | audio thread, when `value` changes | the main-thread tick, which swaps it and sends the `values` message |
+
+Text: one cache in the core, keyed by parameter and value, filled by `value_to_text` only for values that changed,
+and used by both the host UI and the DAW (our macros' `value_to_text`). Main thread only.
+
+Values that change without an event (a WCLAP that loads a preset internally and doesn't report it: a CLAP bug, but
+it happens) would make the table drift. Safety net instead of polling: while the Params view is open, re-read the
+values of the visible parameters with `get_value` at 1 Hz, a few at a time, and treat a difference as a change.
+
+Today: the editor calls `get_value` and `value_to_text` for every parameter every 50 ms, and `count`/`get_info` for
+every parameter on every structural update. Each is a call into the WebAssembly; for a single-threaded WCLAP (23 of
+the 24 catalog plugins) each one also takes the lock the audio thread needs.
+
+## Gestures and ownership
+
+Who can own a parameter: **the host UI** (a drag in Macros or Params) or **the WCLAP** (its own GUI: its DSP sends
+`PARAM_GESTURE_BEGIN`/`END` as output events). **The DAW never owns one**: in CLAP, gestures go from the plugin to the
+host, never back, so the DAW's automation is a plain writer.
+
+| Event for parameter p | owner none | owner UI | owner plugin |
+| --- | --- | --- | --- |
+| UI `begin` | owner = UI, tell the DAW `GESTURE_BEGIN` | (already) | ignored: the plugin's gesture wins |
+| UI value | apply, tell the DAW and the WCLAP | apply | dropped |
+| UI `end` | (nothing open) | apply the final value, `GESTURE_END` to the DAW, owner = none, `ack` to the UI | dropped |
+| WCLAP `GESTURE_BEGIN` | owner = plugin, forward to the DAW (if p is mapped to a macro) | ignored: the UI's gesture wins | (already) |
+| WCLAP value | apply, mark changed | dropped (the UI wins; the next UI value overrides it in the WCLAP) | apply, mark changed |
+| WCLAP `GESTURE_END` | — | ignored | owner = none, forward to the DAW, mark changed |
+| DAW value (automation) | apply | dropped (touch) | dropped (touch) |
+
+A gesture still open after the plugin unloads, a `reset()`, or a skipped block's events lost to an overflow (see the
+bridge's event carry-over) is closed by the core: owner = none, a `GESTURE_END` to the DAW if it was told of a begin.
+
+## What the bridge does and what the core does
+
+wclap-bridge stays a stateless translator between native CLAP and the WCLAP's memory; everything with state lives in
+the core. Overlaps found, and what happens to each:
+
+| Overlap | Decision |
+| --- | --- |
+| The core calls the bridge's `get_value` / `get_info` / `count` per parameter, per tick | Removed: the parameter table (values from events, info cached until `rescan`) |
+| Two callers of `value_to_text` (the editor's text, our macros' text for the DAW) | One text cache in the core, filled only for changed values |
+| Events kept across a skipped block: the bridge's carry-over buffer, and our UI-to-audio queue | Both stay: different layers. The bridge also carries gesture events, so a skip can't leave a gesture open |
+| Output sanity: the bridge zeroes non-finite samples and samples >= 100 (`checkBuffers`) | Only in the bridge; the core doesn't repeat it |
+| `params.flush` when not processing: ours (UI edits, state's parameter fallback) and the bridge's | The core calls it; the bridge translates it. One path |
+
+## One API: stores, commands, streams
+
+Everything the host UI and the core exchange is one of three kinds. Each kind has one set of rules, so a new feature
+picks a kind and gets its threading, versioning, persistence and error handling for free instead of inventing calls.
+
+| Kind | What it is | Rules | Examples |
+| --- | --- | --- | --- |
+| **Store** | State with a current value that others observe | Named, versioned, one owner. The UI `get`s it once, then receives `patch`es (only what changed, with the new version) while subscribed; it changes it with `set`, which the owner validates and answers. | `params`, `macros`, `plugin` (loaded plugin, status, progress), `settings`, `cache`, `transport`, `ui` (view, keyboard) |
+| **Command** | An action with a result | A request that returns `{ok, result}` or `{ok: false, error}`. May change stores; the change then arrives as their patches, never only in the result. | `plugin.load`, `plugin.unload`, `cache.delete`, `cache.clearCompiled`, `macros.autoMap`, `app.openUrl` |
+| **Stream** | High-rate measurements, not state | Subscribed only while visible; sampled on the main thread at its own rate (e.g. 10 Hz); latest wins, nothing is replayed or persisted. | `perf` (DSP load, peak, skipped and too-slow blocks), later meters |
+
+Parameter edits with gestures (below) are the one high-rate input; they stay their own message (`edit`), because they
+go to the audio thread, not to a store's owner.
+
+### The wire
+
+- Host UI to core: one function, `request(name, args)`, returning a promise of `{ok, result | error}`. `name` is
+  `store.get` / `store.set` / `store.subscribe` / `store.unsubscribe` with the store in `args`, a command name, or
+  `stream.subscribe` / `stream.unsubscribe`.
+- Core to host UI: one function, `receive(message)`, with `{kind: "patch" | "stream" | "event", topic, version, data}`.
+  Patches carry the store's version; the UI applies only newer ones (no timers guessing at staleness).
+- On page load the UI sends `hello {protocol}`; the core answers with its protocol version and the full stores the UI
+  subscribes to. A mismatch shows an error instead of half-working.
+
+### Settings
+
+`settings` is a store with a declared schema: per key its type, default, range, and **scope**:
+
+| Scope | Lives in | Example |
+| --- | --- | --- |
+| machine | `settings.json` (every instance, every DAW) | audio wait ratio, concealment on/off, cache budget |
+| instance | the DAW session (our CLAP state) | on-screen keyboard octave, last view |
+| session | memory only | the Performance graph's history |
+
+The schema is the one place a setting is declared: the core validates `set`s against it (clamps, rejects unknown
+keys), the settings page renders from it, and machine-scope changes reach the other instances in this process at
+once (one shared store) and other processes when `settings.json` changes (file watch, or re-read when the window
+gets focus). Values the audio thread needs (the wait ratio) are pushed to it as atomics; it never reads the store.
+
+### Implementation shape
+
+- C++: one registry in the core, the only dispatch the editor calls. `api.store("settings", schema, get, set)`,
+  `api.command("cache.delete", handler)`, `api.stream("perf", sampler, hz)`. Handlers run on the main thread; data
+  from the audio thread reaches them only through lock-free structures (the parameter table, the perf counters).
+  Testable without a webview: call the registry with JSON, inspect the replies and patches.
+- JS: a small client (`api.get/set/subscribe/command/onStream`) over the one binding; views subscribe to the stores
+  and streams they show and unsubscribe when hidden.
+- Names are namespaced (`plugin.*`, `params.*`, `macros.*`, `settings.*`, `cache.*`, `perf.*`, `transport.*`,
+  `keyboard.*`, `ui.*`, `app.*`), and the list of names lives in one file per side, so a grep shows the whole API.
+
+### Today's calls, mapped
+
+| Today | Becomes |
+| --- | --- |
+| `ready` | `hello` |
+| `load`, `unload` | commands `plugin.load`, `plugin.unload` (store `plugin` for status) |
+| `view`, `keyboard` | store `ui` (instance scope) |
+| `setMacro`, `setParam` | `edit` (gestures) |
+| `paramText` | gone: texts arrive with `params` patches |
+| `mapMacro`, `unmapMacro`, `renameMacro`, `autoMap` | store `macros` (`set`) and command `macros.autoMap` |
+| `note` | `edit`-like input `keyboard.note` (to the audio thread) |
+| `transport` | store `transport` |
+| `cacheList`, `cacheDelete`, `cacheClearCompiled` | store `cache`, commands `cache.delete`, `cache.clearCompiled` |
+| `settingsGet`, `settingsSet` | store `settings` |
+| `perfGet` | stream `perf` |
+| `log`, `openUrl` | commands `app.log`, `app.openUrl` |
+| the 50 ms snapshot push | `patch`es of the subscribed stores |
+
+## Other channels
+
+Found in an audit of the code; each needs a place in the API above.
+
+| Channel | Today | Decision |
+| --- | --- | --- |
+| **Picker iframe → host UI** (`plugincircuit:select` / `cancel` via `postMessage`) | `host-ui/app.js` accepts it from any sender: no `e.source` / `e.origin` check, so any frame in the page could make the plugin load something | Accept only from the picker iframe (`e.source === picker.contentWindow`) and the catalog's origin. The message format is a contract with the website: versioned, documented in the website's `docs/API.md` |
+| **Host UI → catalog server** (`/v1/health`, the picker URL, links) | the page decides "offline" itself; the core decides it separately | An `app` store owned by the core (online state, API base); the page stops fetching `/v1/health` |
+| **Native → page events** beyond the snapshot: note keys forwarded from a focused plugin GUI (`plugincircuitHost.key`) | a second function on `window` | An `event` message on the one wire (`keyboard.key`) |
+| **Errors** (load failures, WebAssembly traps, the bridge's log) | the DAW's log and stderr; the UI only sees status "Error" and a message | A `plugin.errors` store (recent errors, with time and source) |
+| **Notes from the DAW** shown on the on-screen keyboard | not shown | Optional stream `keyboard.notes`: the audio thread pushes note on/off into a preallocated queue, the main thread samples it |
+| **Between DAW processes**: `settings.json`, package locks, `usage.json` | locks and usage work; another process sees a settings change only after a restart | Machine-scope settings: watch `settings.json` (or re-read on window focus) |
+| **The WCLAP's tail** | the inner host's `clap.tail` `changed()` is a no-op, the plugin's tail is never asked for, we offer the DAW no `clap.tail`, and `processBlock` always returns `CONTINUE` (the plugin's sleep / tail status is dropped) | Offer `clap.tail` (the inner plugin's value), forward `changed()` to the DAW, pass the inner process status through (with `request_process` when the UI queues events, so a sleeping plugin wakes for on-screen notes) |
+| **The WCLAP's note ports** | the inner host's `note_ports.rescan()` is a no-op | Treat it as a restart (`request_restart`): our note-dialect conversion is chosen in `activate()` |
+| Latency, `mark_dirty`, timers, `on_main_thread`, editor resizing | handled | unchanged |
+
 ## Messages
 
 ### Host UI to core: requests

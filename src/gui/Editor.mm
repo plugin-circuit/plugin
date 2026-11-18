@@ -269,6 +269,7 @@ struct Editor::Impl {
 	void setView(const std::string &v) {
 		if (std::getenv("PLUGINCIRCUIT_DEBUG_UI")) std::fprintf(stderr, "[plugincircuit] setView %s -> %s\n", view.c_str(), v.c_str());
 		view = v;
+		if (view != "settings") plugin.changeInstance(choc::value::createObject("Ui", "view", view)); // reopened on it
 		if (view == "plugin") createInnerGui();
 		layout();
 	}
@@ -278,14 +279,24 @@ struct Editor::Impl {
 	// the view), and `app.*`. The plugin adds the rest (PluginCircuitPlugin::registerApi).
 	void registerApi() {
 		plugin.registerApi(api);
-		api.store("ui", {[this] { return choc::value::createObject("Ui", "view", view, "keyboard", keyboardHeight > 0, "innerGui", innerGuiCreated); },
-		                 [this] { return std::hash<std::string>{}(view) * 4 + (keyboardHeight > 0 ? 2 : 0) + (innerGuiCreated ? 1 : 0) + 1; },
+		// view and keyboardBase are instance-scope settings (SettingsSchema.h): the plugin keeps them in its state
+		api.store("ui", {[this] {
+			                 return choc::value::createObject("Ui", "view", view, "keyboard", keyboardHeight > 0, "innerGui", innerGuiCreated,
+			                                                  "keyboardBase", plugin.instance()["keyboardBase"].getWithDefault<double>(48));
+		                 },
+		                 [this] {
+			                 return Api::mix(Api::mix(std::hash<std::string>{}(view), (keyboardHeight > 0 ? 2 : 0) + (innerGuiCreated ? 1 : 0)),
+			                                 plugin.instanceVersion());
+		                 },
 		                 [this](const choc::value::ValueView &v) -> std::string {
 			                 if (!v.isObject()) return "expected an object";
 			                 for (uint32_t i = 0; i < v.size(); ++i) {
 				                 const std::string k = v.getObjectMemberAt(i).name;
-				                 if (k != "view" && k != "keyboard") return "unknown key '" + k + "'";
+				                 if (k != "view" && k != "keyboard" && k != "keyboardBase") return "unknown key '" + k + "'";
 			                 }
+			                 if (v.hasObjectMember("keyboardBase")) // checked first: a refused set changes nothing
+				                 if (auto e = plugin.changeInstance(choc::value::createObject("Ui", "keyboardBase", v["keyboardBase"])); !e.empty())
+					                 return e;
 			                 if (v.hasObjectMember("view")) {
 				                 const std::string next = v["view"].isString() ? std::string(v["view"].getString()) : "";
 				                 if (next != "plugin" && next != "browse" && next != "macros" && next != "params" && next != "settings")
@@ -511,7 +522,9 @@ struct Editor::Impl {
 		[container addSubview:innerHolder]; // above the webview
 		layout();
 
-		view = plugin.innerForGui() ? "plugin" : "browse";
+		// the view this instance was last on (its state), if it still makes sense: no plugin, no plugin views
+		const std::string last = plugin.instance()["view"].getWithDefault<std::string>("plugin");
+		view = plugin.innerForGui() ? last : "browse";
 		if (std::getenv("PLUGINCIRCUIT_DEBUG_UI")) std::fprintf(stderr, "[plugincircuit] editor created, view %s\n", view.c_str());
 		if (view == "plugin") createInnerGui();
 		keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp)

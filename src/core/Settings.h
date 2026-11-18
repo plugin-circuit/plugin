@@ -1,21 +1,24 @@
 #pragma once
-// Global settings shared by every Plugin Circuit instance on this machine (Paths::root()/settings.json).
-// File IO: main thread only.
+// Machine settings: shared by every Plugin Circuit instance on this machine, in Paths::root()/settings.json. Declared
+// in src/api/SettingsSchema.h (scope machine). One copy per process: every instance sees a change at once; another
+// process's change is picked up by poll(). Main thread (and the loader's first init); never the audio thread.
+#include <choc/containers/choc_Value.h>
+
+#include <cstdint>
+#include <string>
+
 namespace plugincircuit {
 
-struct Settings {
-	// Single-threaded WCLAPs: how long the audio thread may spin for the plugin's instance while the main thread is
-	// inside it, as a fraction of the block (0 = try once; 0.9 max), before it skips the block. See wclap-bridge's
-	// wclap_set_audio_wait_ratio().
-	static constexpr float kDefaultAudioWaitRatio = 0.2f;
-	float audioWaitRatio = kDefaultAudioWaitRatio;
-	// A skipped block continues the audio (linear prediction, faded) instead of cutting to silence: no clicks at its
-	// edges, no added latency. wclap_set_conceal_dropouts().
-	bool concealDropouts = true;
-
-	static Settings load();
-	void save() const;
-	void apply() const; // pushes the values to the bridge
+class Settings {
+public:
+	static choc::value::Value values(); // the machine settings, whole (read from the file once)
+	// A change from the page, validated against the schema (clamped, unknown keys refused): saved, applied to the
+	// bridge, and the version bumped. "" when done, else the error.
+	static std::string set(const choc::value::ValueView &change);
+	static uint64_t version(); // changes whenever values() may have
+	// Re-reads settings.json if it changed on disk (another process wrote it); at most every `minInterval` seconds.
+	static void poll(double minInterval = 0.5);
+	static void apply(); // pushes the values the audio thread uses to the bridge
 };
 
 } // namespace plugincircuit

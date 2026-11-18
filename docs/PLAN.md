@@ -194,6 +194,26 @@ one at a time (settings first: it's self-contained; then macros/params; the plug
 
 ## Phase 4: settings schema and scopes — M
 
+Status: done. `src/api/SettingsSchema.h/.cpp` declares every setting (key, type, default, range and step, scope,
+label, help, display format); `settings::apply` validates a change (numbers clamped and snapped to their step,
+unknown keys, keys of another scope and wrong types refused, all or nothing), `settings::sanitize` reads stored
+values (a file or a state: bad values default, unknown keys dropped). Decisions:
+- Machine scope is the `settings` store (`Settings`, one copy per process); instance scope is the `ui` store
+  (`view`, `keyboardBase`), kept by the plugin and saved in our state, so it outlives the editor. Changing them
+  doesn't mark the session dirty (a view isn't worth "save changes?"); they're saved with the next save.
+- The Advanced tab renders from `settings.schema` (the machine settings with a label): a bool is a checkbox, a
+  number with a step a menu of its steps.
+- State version 2 adds `"instance"`; version 1 loads with defaults; a newer version is refused as before.
+- 4.3 is a stat of `settings.json` (mtime, size) from the plugin's housekeeping timer, at most every 0.5 s, rather
+  than a platform file watch: portable, no thread, and it runs with the editor closed (the audio values reach the
+  bridge then too). `settings.json` keeps keys this version doesn't know (a newer version's).
+- The editor opens on the instance's last view while a plugin with a GUI is loaded, else on Browse.
+Tests: `settings` (schema, a state round trip and a version-1 state, two writers in one process, another
+process's write picked up and a rewrite with the same values ignored), `plugin-param-events` (the instance
+settings round-trip through the real plugin's state), `host-ui-stores` (the Advanced tab from the schema, the
+octave through the `ui` store). Checked in the editor harness: 10 menu steps, an unknown key refused, an octave of
+999 clamped to 84 and followed by the page.
+
 **4.1 Schema** (`src/api/SettingsSchema.h`): key, type, default, range, scope, label, help text. The core validates
 `settings.set` against it; the Advanced tab renders from it (no hand-written controls per setting).
 

@@ -3,11 +3,13 @@
 //   - a params delta patch updates a row; a stale patch (not newer) is ignored
 //   - a store.set racing its patches: one built before the set doesn't undo it, the one after it applies
 //   - a dragged value stays the page's until the core acknowledges the drag's end
+//   - the Advanced tab renders from the settings schema; a change is a settings set
+//   - the keyboard octave is the ui store's (instance scope): it follows the store and sets it
 //   - the settings page subscribes to its stores and stream only while shown
 //
 // Run: bun tests/host-ui/stores.ts   (uses Playwright from ../website/node_modules)
 import { join } from "node:path"
-import { defaultStores, installMockHost, serveHostUi } from "./mock_host"
+import { defaultSchema, defaultStores, installMockHost, serveHostUi } from "./mock_host"
 
 const playwright = await import(join(import.meta.dir, "../../../website/node_modules/@playwright/test/index.mjs"))
 const host = serveHostUi(join(import.meta.dir, "../../host-ui"))
@@ -27,7 +29,7 @@ const infos = Array.from({ length: 300 }, (_, i) => ({ id: i, name: `Param ${i}`
 stores.params = { full: true, infos, values: infos.map((p) => ({ id: p.id, value: 0.5, text: `v${p.id}` })) }
 stores.ui = { view: "params", keyboard: false, innerGui: false }
 
-await page.addInitScript(installMockHost, { stores })
+await page.addInitScript(installMockHost, { stores, schema: defaultSchema })
 await page.goto(`http://127.0.0.1:${host.port}/`)
 await page.waitForTimeout(500)
 
@@ -100,6 +102,41 @@ const subs = await page.evaluate(async () => {
 })
 for (const want of ["store.get:cache", "store.get:settings", "stream.subscribe:perf", "store.unsubscribe:cache", "store.unsubscribe:settings", "stream.unsubscribe:perf"])
   check(subs.includes(want), `settings page: ${want}`, subs)
+
+// the Advanced tab from the schema
+const advanced = await page.evaluate(async () => {
+  const w = window as any
+  w.setView("settings")
+  await new Promise((r) => setTimeout(r, 50))
+  const sel = document.querySelector("#setting-audioWaitRatio") as HTMLSelectElement
+  const box = document.querySelector("#setting-concealDropouts") as HTMLInputElement
+  const result = { options: sel ? [...sel.options].map((o) => o.textContent) : null, value: sel?.value, checked: box?.checked }
+  sel.value = "0.5"
+  sel.dispatchEvent(new Event("change"))
+  box.click()
+  await new Promise((r) => setTimeout(r, 30))
+  const sets = w.__requests.filter((r: any) => r.name === "store.set" && r.args.store === "settings").map((r: any) => r.args.value)
+  w.setView("params")
+  return { ...result, sets }
+})
+check(advanced.options?.length === 10 && advanced.options[0] === "Off (try once)" && advanced.options[2] === "20% of a block (default)",
+  "the Advanced tab renders a number setting from the schema", advanced.options)
+check(advanced.value === "0.2" && advanced.checked === true, "its controls show the settings store's values", advanced)
+check(JSON.stringify(advanced.sets) === JSON.stringify([{ audioWaitRatio: 0.5 }, { concealDropouts: false }]), "a change is a settings set", advanced.sets)
+
+// the keyboard octave: from the ui store, and set to it
+const octave = await page.evaluate(async () => {
+  const w = window as any
+  w.__patch("ui", { ...w.__stores.ui, keyboardBase: 60 })
+  await new Promise((r) => setTimeout(r, 20))
+  const fromStore = (0, eval)("kbd.base")
+  ;(document.querySelector("#octDown") as HTMLElement).click()
+  await new Promise((r) => setTimeout(r, 20))
+  const sets = w.__requests.filter((r: any) => r.name === "store.set" && r.args.store === "ui" && "keyboardBase" in r.args.value)
+  return { fromStore, after: (0, eval)("kbd.base"), set: sets.pop()?.args.value }
+})
+check(octave.fromStore === 60, "the keyboard's octave follows the ui store", octave)
+check(octave.after === 48 && octave.set?.keyboardBase === 48, "an octave shift sets the ui store", octave)
 
 console.log(failures ? `${failures} failure(s)` : "PASS: the host UI follows its stores")
 await browser.close()

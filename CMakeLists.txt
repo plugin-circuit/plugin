@@ -87,6 +87,7 @@ add_library(plugincircuit-core STATIC
 	src/core/PackageCache.cpp
 	src/core/Settings.cpp
 	src/api/Api.cpp
+	src/api/SettingsSchema.cpp
 	src/core/Paths.cpp
 	src/core/WclapLibrary.cpp
 	src/core/InnerHost.cpp)
@@ -182,6 +183,11 @@ add_test(NAME gestures COMMAND plugincircuit-gestures-test)
 add_executable(plugincircuit-api-test tests/api_test.cpp src/api/Api.cpp)
 target_include_directories(plugincircuit-api-test PRIVATE src ${CHOC_DIR})
 add_test(NAME api COMMAND plugincircuit-api-test)
+# settings (PLAN.md phase 4): schema validation, instance settings in our state, machine settings across processes
+add_executable(plugincircuit-settings-test tests/settings_test.cpp src/plugin/StateCodec.cpp src/plugin/Macros.cpp)
+target_include_directories(plugincircuit-settings-test PRIVATE src)
+target_link_libraries(plugincircuit-settings-test PRIVATE plugincircuit-core)
+add_test(NAME settings COMMAND plugincircuit-settings-test)
 # host UI: only the catalog's picker iframe may load plugins (headless Chromium, via the website's Playwright)
 find_program(BUN_EXECUTABLE bun)
 if (BUN_EXECUTABLE AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../website/node_modules/@playwright/test)

@@ -8,6 +8,7 @@
 //    happen on the audio thread (`audioStarted_`), except when the outer plugin isn't processing.
 //  - Loading (fetch metadata, download, verify, extract, compile wasm) runs on a worker thread;
 //    creating/activating the inner plugin happens back on the main thread.
+#include "api/SettingsSchema.h"
 #include "core/Catalog.h"
 #include "core/InnerHost.h"
 #include "core/PackageCache.h"
@@ -252,6 +253,18 @@ private:
 	};
 	std::deque<PendingEnd> pendingEnds_; // main thread
 	choc::value::Value takeEnded();       // main thread: the ends applied since the last call
+
+	// instance-scope settings (src/api/SettingsSchema.h), main thread; saved in our state
+	choc::value::Value instance_ = settings::defaults(Scope::Instance);
+	uint64_t instanceVersion_ = 1;
+
+public:
+	const choc::value::Value &instance() const { return instance_; }
+	uint64_t instanceVersion() const { return instanceVersion_; }
+	void setInstance(const choc::value::ValueView &stored);         // from a state: sanitized
+	std::string changeInstance(const choc::value::ValueView &change); // from the page: validated; "" or the error
+
+private:
 
 	// installed packages for the snapshot: a disk scan, so cached (main thread)
 	std::vector<CatalogPlugin> installedCache_;

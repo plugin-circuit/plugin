@@ -13,6 +13,8 @@
 #include "core/Catalog.h"
 #include "plugin/StateCodec.h"
 
+#include <choc/text/choc_JSON.h>
+
 #include <clap/clap.h>
 
 #include <atomic>
@@ -153,6 +155,7 @@ int main(int argc, char **argv) {
 	session.macros.macros[0].targets.push_back(level);
 	session.macros.macros[0].name = "Level"; // published when the load finishes: the test's "loaded" signal
 	session.macros.macros[0].customName = true;
+	session.instance = choc::json::parse(R"({"view": "macros", "keyboardBase": 72})"); // instance settings (phase 4)
 
 	constexpr uint32_t frames = 256;
 	std::string bin = std::string(argv[1]) + "/Contents/MacOS/PluginCircuit";
@@ -198,6 +201,13 @@ int main(int argc, char **argv) {
 	const clap_plugin *p = open(session);
 	if (!p) return 1;
 	auto *state = (const clap_plugin_state *)p->get_extension(p, CLAP_EXT_STATE);
+	{ // the instance settings came in with the session and go out with it
+		std::string error;
+		auto saved = decodeState(saveState(p, state), error);
+		CHECK(saved && saved->instance["view"].getWithDefault<std::string>("") == "macros" &&
+		          saved->instance["keyboardBase"].getWithDefault<double>(0) == 72,
+		      "the instance settings didn't round-trip through the plugin's state%s", "");
+	}
 	std::vector<float> l(frames), r(frames);
 	float *outs[2] = {l.data(), r.data()};
 	clap_audio_buffer out{outs, nullptr, 2, 0, 0};

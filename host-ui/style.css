@@ -149,8 +149,8 @@ body[data-view="settings"] .view[data-view="settings"] { display: block; }
 .cache-size, .cache-used { font: 400 12px var(--f-mono); color: var(--c-text-muted); text-align: right; white-space: nowrap; }
 .cache-row.setting-row { grid-template-columns: 1fr auto; background: var(--c-surface); border-radius: var(--r-sm); }
 .cache-row.setting-row .cache-name, .cache-row.setting-row .cache-sub { white-space: normal; }
-#concealDropouts { width: 18px; height: 18px; accent-color: var(--c-accent-ink); }
-#audioWait { height: 32px; padding: 0 10px; border-radius: var(--r-sm); border: 0; background: var(--c-raised); color: var(--c-text); }
+.setting-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--c-accent-ink); }
+.setting-row select { height: 32px; padding: 0 10px; border-radius: var(--r-sm); border: 0; background: var(--c-raised); color: var(--c-text); }
 /* performance: DSP load graph (the last 60 s) and counters */
 .perf-card { background: var(--c-surface); border-radius: var(--r-sm); padding: 12px 14px 10px; }
 #perfGraph { display: block; width: 100%; height: 140px; }

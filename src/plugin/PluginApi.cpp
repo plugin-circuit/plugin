@@ -2,6 +2,7 @@
 // The editor adds its own (`ui`, `app.*`, `plugin.load` / `plugin.unload`, which also switch the view).
 #include "api/Api.h"
 #include "core/PackageCache.h"
+#include "api/SettingsSchema.h"
 #include "core/Settings.h"
 #include "core/Util.h"
 #include "plugin/PluginCircuitPlugin.h"
@@ -36,7 +37,6 @@ std::string unknownKey(const View &v, std::initializer_list<const char *> known)
 	}
 	return {};
 }
-std::atomic<uint64_t> settingsVersion{1}; // machine settings changed in this process
 } // namespace
 
 Value PluginCircuitPlugin::paramValues(ParamTable &table, bool full) {
@@ -225,28 +225,9 @@ void PluginCircuitPlugin::registerApi(Api &api) {
 	});
 
 	// ---- settings (machine scope: settings.json)
-	api.store("settings", {[] {
-		                       const auto s = Settings::load();
-		                       return choc::value::createObject("Settings", "audioWaitRatio", double(s.audioWaitRatio), "concealDropouts", s.concealDropouts);
-	                       },
-	                       [] { return settingsVersion.load(); },
-	                       [](const View &v) -> std::string {
-		                       if (auto e = unknownKey(v, {"audioWaitRatio", "concealDropouts"}); !e.empty()) return e;
-		                       auto s = Settings::load();
-		                       if (v.hasObjectMember("audioWaitRatio")) {
-			                       const double r = number(v, "audioWaitRatio", -1);
-			                       if (r < 0 || r > 0.9) return "audioWaitRatio must be 0..0.9";
-			                       s.audioWaitRatio = float(r);
-		                       }
-		                       if (v.hasObjectMember("concealDropouts")) {
-			                       if (!v["concealDropouts"].isBool()) return "concealDropouts must be true or false";
-			                       s.concealDropouts = v["concealDropouts"].getBool();
-		                       }
-		                       s.save();
-		                       s.apply();
-		                       ++settingsVersion;
-		                       return {};
-	                       }});
+	api.store("settings", {[] { return Settings::values(); }, [] { return Settings::version(); },
+	                       [](const View &v) { return Settings::set(v); }});
+	api.command("settings.schema", [](const View &, std::string &) { return settings::describe(Scope::Machine); });
 
 	// ---- cache: the downloaded packages and the compile cache
 	api.store("cache", {[this] {

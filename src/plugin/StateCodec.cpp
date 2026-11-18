@@ -1,5 +1,7 @@
 #include "plugin/StateCodec.h"
 
+#include "api/SettingsSchema.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -10,6 +12,8 @@
 namespace plugincircuit {
 
 namespace {
+
+constexpr uint32_t kStateVersion = 2;
 
 void putU32(std::vector<uint8_t> &out, uint32_t v) {
 	for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i)));
@@ -50,10 +54,11 @@ std::vector<uint8_t> encodeState(const HostState &s) {
 	auto json = choc::value::createObject("PluginCircuitState", "pluginId", s.pluginId, "pluginName", s.pluginName, "vendor", s.vendor,
 	                                      "packageId", s.packageId, "packageSha256", s.packageSha256, "moduleSha256", s.moduleSha256,
 	                                      "autoMapped", s.macros.autoMapped, "macros", macros, "innerParams", params);
+	json.addMember("instance", settings::sanitize(Scope::Instance, s.instance));
 	auto text = choc::json::toString(json, false);
 
 	std::vector<uint8_t> out = {'P', 'L', 'C', 'I'};
-	putU32(out, 1);
+	putU32(out, kStateVersion);
 	putU32(out, (uint32_t)text.size());
 	out.insert(out.end(), text.begin(), text.end());
 	putU32(out, (uint32_t)s.innerState.size());
@@ -68,7 +73,7 @@ std::optional<HostState> decodeState(const std::vector<uint8_t> &in, std::string
 	}
 	size_t pos = 4;
 	uint32_t version = 0, jsonSize = 0, innerSize = 0;
-	if (!getU32(in, pos, version) || version != 1) {
+	if (!getU32(in, pos, version) || version < 1 || version > kStateVersion) {
 		error = "unsupported state version";
 		return std::nullopt;
 	}
@@ -83,6 +88,7 @@ std::optional<HostState> decodeState(const std::vector<uint8_t> &in, std::string
 		return std::nullopt;
 	}
 	HostState s;
+	s.instance = settings::defaults(Scope::Instance); // version 1 had none
 	s.innerState.assign(in.begin() + (long)pos, in.begin() + (long)(pos + innerSize));
 	try {
 		// Untrusted input: macro values are normalised, ids must be integral clap_ids (casting anything else is UB).
@@ -121,6 +127,7 @@ std::optional<HostState> decodeState(const std::vector<uint8_t> &in, std::string
 				}
 			}
 		}
+		if (version >= 2 && j.hasObjectMember("instance")) s.instance = settings::sanitize(Scope::Instance, j["instance"]);
 		if (j.hasObjectMember("innerParams") && j["innerParams"].isArray())
 			for (auto p : j["innerParams"]) {
 				clap_id id = CLAP_INVALID_ID;

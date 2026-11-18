@@ -52,7 +52,7 @@ bool WclapLibrary::ensureGlobalInit(std::string &error) {
 		return false;
 	}
 	globalInitDone = true;
-	Settings::load().apply(); // the audio wait for single-threaded WCLAPs
+	Settings::apply(); // the audio wait for single-threaded WCLAPs
 	return true;
 }
 

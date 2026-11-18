@@ -49,6 +49,7 @@ function mergeParamValues(values) {
 
 let macroShape = "";
 function subscribeStores() {
+  command("settings.schema").then((schema) => schema && renderAdvanced(schema)); // the Advanced tab
   api.subscribe("plugin", (v) => {
     const pluginChanged = JSON.stringify(v.plugin) !== JSON.stringify(state.snap.plugin);
     Object.assign(state.snap, v);
@@ -81,6 +82,7 @@ function subscribeStores() {
     // the first value always applies: the page starts on "browse", and entering a view does its work (the picker)
     if (v.view !== state.view || !state.initialised) { state.initialised = true; setView(v.view, false); }
     showKeyboard(v.keyboard, false);
+    if (typeof v.keyboardBase === "number" && v.keyboardBase !== kbd.base) { kbd.allOff(); kbd.base = v.keyboardBase; buildKeys(); }
     render(false);
   });
 }
@@ -692,6 +694,7 @@ function shiftOctave(d) {
   kbd.allOff();
   kbd.base = base;
   buildKeys();
+  api.set("ui", { keyboardBase: base }).catch((e) => log("octave:", e.message)); // instance scope: saved with the session
 }
 $("octDown").onclick = () => shiftOctave(-1);
 $("octUp").onclick = () => shiftOctave(1);
@@ -829,21 +832,64 @@ $("cacheClearCompiled").onclick = confirmFirst($("cacheClearCompiled"), () => "C
   () => command("cache.clearCompiled"));
 
 // ---------------------------------------------------------------- settings: advanced
-{
-  const sel = $("audioWait");
-  for (let p = 0; p <= 90; p += 10) {
-    const o = document.createElement("option");
-    o.value = String(p / 100);
-    o.textContent = p === 0 ? "Off (try once)" : `${p}% of a block${p === 20 ? " (default)" : ""}`;
-    sel.appendChild(o);
+// Rendered from the schema (src/api/SettingsSchema.h, the machine settings with a label): a bool is a checkbox, a
+// number with a step a menu of its steps. The core validates; a refused change comes back as the store's value.
+const advanced = { controls: new Map(), values: null }; // key -> {def, el}
+function fmtSetting(d, v) {
+  if (v === 0 && d.zeroLabel) return d.zeroLabel;
+  const t = d.format === "percent" ? `${Math.round(v * 100)}%` : String(v);
+  return `${t}${d.suffix || ""}${v === d.default ? " (default)" : ""}`;
+}
+function renderAdvanced(schema) {
+  const box = $("advancedRows");
+  box.textContent = "";
+  advanced.controls.clear();
+  for (const d of schema) {
+    const row = document.createElement(d.type === "bool" ? "label" : "div");
+    row.className = "cache-row setting-row";
+    const name = document.createElement("span");
+    name.className = "cache-name";
+    name.textContent = d.label;
+    const sub = document.createElement("span");
+    sub.className = "cache-sub";
+    sub.textContent = d.help;
+    name.appendChild(sub);
+    let el;
+    if (d.type === "bool") {
+      el = document.createElement("input");
+      el.type = "checkbox";
+      el.onchange = () => api.set("settings", { [d.key]: el.checked }).catch((e) => log("settings:", e.message));
+    } else if (d.type === "number" && d.step > 0) {
+      el = document.createElement("select");
+      for (let i = 0; d.min + i * d.step <= d.max + 1e-9; ++i) {
+        const v = Math.round((d.min + i * d.step) * 1e6) / 1e6;
+        const o = document.createElement("option");
+        o.value = String(v);
+        o.textContent = fmtSetting(d, v);
+        el.appendChild(o);
+      }
+      el.onchange = () => api.set("settings", { [d.key]: Number(el.value) }).catch((e) => log("settings:", e.message));
+    } else if (d.type === "choice") {
+      el = document.createElement("select");
+      for (const c of d.choices) { const o = document.createElement("option"); o.value = o.textContent = c; el.appendChild(o); }
+      el.onchange = () => api.set("settings", { [d.key]: el.value }).catch((e) => log("settings:", e.message));
+    } else continue; // a free number: no control yet
+    el.id = "setting-" + d.key;
+    el.setAttribute("aria-label", d.label);
+    row.append(name, el);
+    box.appendChild(row);
+    advanced.controls.set(d.key, { d, el });
   }
-  sel.onchange = () => api.set("settings", { audioWaitRatio: Number(sel.value) }).catch((e) => log("settings:", e.message));
-  $("concealDropouts").onchange = (e) => api.set("settings", { concealDropouts: e.target.checked }).catch((err) => log("settings:", err.message));
+  if (advanced.values) onSettings(advanced.values);
 }
 function onSettings(s) { // the settings store
-  if (!s || typeof s.audioWaitRatio !== "number") return;
-  $("audioWait").value = String(Math.round(s.audioWaitRatio * 10) / 10);
-  $("concealDropouts").checked = s.concealDropouts !== false;
+  if (!s) return;
+  advanced.values = s;
+  for (const [key, { d, el }] of advanced.controls) {
+    if (!(key in s)) continue;
+    if (d.type === "bool") el.checked = !!s[key];
+    else el.value = String(d.type === "number" ? Math.round(s[key] * 1e6) / 1e6 : s[key]);
+  }
 }
 function showSkipped(skipped) { // from the perf stream
   $("audioWaitNote").textContent = skipped

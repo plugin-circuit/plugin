@@ -1,5 +1,8 @@
 #include "plugin/PluginCircuitPlugin.h"
 
+#include "api/SettingsSchema.h"
+#include "core/Settings.h"
+
 #include "gui/Editor.h"
 
 #include <bit>
@@ -542,7 +545,9 @@ void PluginCircuitPlugin::onMainThread() {
 bool PluginCircuitPlugin::stateSave(const clap_ostream *stream) {
 	std::vector<uint8_t> bytes;
 	if (!current_ && missingState_) {
-		bytes = encodeState(*missingState_); // a plugin we couldn't load: keep its state untouched
+		auto kept = *missingState_; // a plugin we couldn't load: keep its state untouched
+		kept.instance = instance_;
+		bytes = encodeState(kept);
 	} else {
 		HostState s;
 		if (current_) {
@@ -561,6 +566,7 @@ bool PluginCircuitPlugin::stateSave(const clap_ostream *stream) {
 		}
 		s.macros = *macros_.load();
 		for (uint32_t i = 0; i < kNumMacros; ++i) s.macroValues[i] = macroValues_[i].load();
+		s.instance = instance_;
 		bytes = encodeState(s);
 	}
 	size_t written = 0;
@@ -587,6 +593,7 @@ bool PluginCircuitPlugin::stateLoad(const clap_istream *stream) {
 		setStatus(Status::Error, error);
 		return false;
 	}
+	setInstance(state->instance); // ours, whatever happens to the plugin
 	if (state->empty()) {
 		uiUnload();
 		publishMacros(state->macros);
@@ -835,7 +842,20 @@ void PluginCircuitPlugin::publishMacros(MacroMap map) {
 	stateVersion_++;
 }
 
+// ---- instance-scope settings (src/api/SettingsSchema.h): this instance, saved in our CLAP state
+void PluginCircuitPlugin::setInstance(const choc::value::ValueView &stored) {
+	instance_ = settings::sanitize(Scope::Instance, stored);
+	++instanceVersion_;
+}
+
+std::string PluginCircuitPlugin::changeInstance(const choc::value::ValueView &change) {
+	if (auto e = settings::apply(Scope::Instance, change, instance_); !e.empty()) return e;
+	++instanceVersion_; // not markDirty(): a view or an octave isn't worth a "save changes?"; saved with the session
+	return {};
+}
+
 void PluginCircuitPlugin::housekeeping() {
+	Settings::poll(); // another process changed settings.json
 	std::unique_ptr<LoadJob> job;
 	{
 		std::lock_guard<std::mutex> lock(jobMutex_);

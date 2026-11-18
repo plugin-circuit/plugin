@@ -124,6 +124,9 @@ go to the audio thread, not to a store's owner.
 | instance | the DAW session (our CLAP state) | on-screen keyboard octave, last view |
 | session | memory only | the Performance graph's history |
 
+Built (phase 4): the schema is `src/api/SettingsSchema.h`; machine settings are the `settings` store, instance
+settings (`view`, `keyboardBase`) the `ui` store, and `settings.schema` returns what the Advanced tab renders.
+
 The schema is the one place a setting is declared: the core validates `set`s against it (clamps, rejects unknown
 keys), the settings page renders from it, and machine-scope changes reach the other instances in this process at
 once (one shared store) and other processes when `settings.json` changes (file watch, or re-read when the window

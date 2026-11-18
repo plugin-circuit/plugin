@@ -40,7 +40,7 @@ FetchContent_Declare(wclap-bridge
 	# Our fork: upstream WebCLAP/wclap-bridge plus our fixes, one commit each, on the plugin-circuit branch (its
 	# webview-gui submodule points at our webview-gui fork). See docs/UPSTREAM.md.
 	GIT_REPOSITORY https://github.com/plugin-circuit/wclap-bridge
-	GIT_TAG f33cd85057e9015908e9da22a2a5c38a4f5fde35
+	GIT_TAG c913ef3f8a3d6a00268ed9643872bdd3e4f958fc
 	GIT_SUBMODULES_RECURSE ON
 	UPDATE_DISCONNECTED ON
 	SOURCE_SUBDIR do-not-add) # added manually below, after clap-wrapper

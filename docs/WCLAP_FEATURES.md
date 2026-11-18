@@ -20,7 +20,7 @@ the dialogs.
 | Copy (`navigator.clipboard.writeText`) | works (the `webview-gui:` page is a secure context) | same | ctest |
 | Paste (`readText`) | `NotAllowedError` from a script click | works with a real click, after WebKit's own "Paste" bubble (as in Safari: the user confirms each read). No catalog plugin reads the clipboard; if one needs paste without the bubble, answer `readText` natively (NSPasteboard) from the init script | by hand (2026-11-18): `paste: ok` with the clipboard's text |
 | Pointer lock | `WrongDocumentError` from a script click | **refused** with a real, trusted click too (`WrongDocumentError`). Cause not verified: check in WebKit's source what WKWebView needs from its embedder to allow it. Slide, MNO and coopiano catch the refusal and fall back to normal dragging | by hand (2026-11-18) |
-| `localStorage` | persists, but one origin `webview-gui://` for every plugin | open: needs a per-plugin origin (the bridge has to pass the plugin id to webview-gui) | probe `origin`, `storageRuns` |
+| `localStorage` | persists, but one origin `webview-gui://` for every plugin | each plugin's page has its own origin, `webview-gui://<plugin id>/` (webview-gui's CLAP helper passes the id; no bridge change): separate, persistent storage per plugin, shared by its instances. What pages stored under the old shared origin isn't visible any more (Spiral303's user presets) | probe: `origin=webview-gui://studio.plugincircuit.test.web-features`, `storageRuns` 1 then 2; Six Sines and Tapa still load their GUIs |
 | Drag and drop of files onto the page | unverified | works: the page gets the file (name, size) | by hand (2026-11-18): `drop: grainfernoLog.txt 0 B` |
 | WebGL 2, page↔plugin messages | work | same | probe |
 

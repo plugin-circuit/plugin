@@ -36,15 +36,16 @@ jobs:
             args: "-DPLUGINCIRCUIT_BUILD_PLUGIN=OFF"
     steps:
       - uses: actions/checkout@v4
-      - uses: plugin-circuit/ci-actions/setup-build-tools@v0.1.0
+      - uses: plugin-circuit/ci-actions/setup-build-tools@v0.1.1
         with:
           LLVM: ${{ matrix.llvm }}
-      - uses: plugin-circuit/ci-actions/cache-deps@v0.1.0
-      - uses: plugin-circuit/ci-actions/cmake-build@v0.1.0
+      - uses: plugin-circuit/ci-actions/cache-deps@v0.1.1
+      - uses: plugin-circuit/ci-actions/cmake-build@v0.1.1
         with:
           BUILD_TYPE: RelWithDebInfo
           CMAKE_BUILD_ARGS: ${{ matrix.args }}
+          KEEP_GOING: ${{ startsWith(matrix.name, 'Windows') }} # while porting: every Windows error in one run
       # GUI tests (label gui) need a window session; they run locally for now
-      - uses: plugin-circuit/ci-actions/cmake-test@v0.1.0
+      - uses: plugin-circuit/ci-actions/cmake-test@v0.1.1
         with:
           EXCLUDE_LABELS: gui

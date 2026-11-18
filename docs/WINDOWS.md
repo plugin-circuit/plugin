@@ -1,6 +1,16 @@
 # Windows: the plugin, the SDK and the WCLAP features we don't support yet
 
-Status: not started. Nothing of Plugin Circuit has ever been built or run on Windows.
+Status: W1 done, W2 in progress (2026-11-18). CI (`.github/workflows/build_test.yml`, with the shared actions in
+[plugin-circuit/ci-actions](https://github.com/plugin-circuit/ci-actions)) builds the core with MSVC on
+`windows-2022` and runs its 8 tests there (editor-layout, param-table, gestures, api, settings, package-cache,
+catalog-health with WinHTTP, dropout-concealer): green. The plugin target (`PLUGINCIRCUIT_BUILD_PLUGIN=OFF` there)
+waits for W3.
+
+Fixed for Windows so far: Objective-C enabled only on Apple; MSVC warning flags (`/W3 /utf-8`); sccache with
+embedded debug info (`/Z7`, in ci-actions); `THL_PLATFORM_WINDOWS` for tanh-net's WinHTTP backend; per-platform data
+folders (`%APPDATA%\Plugin Circuit`, `$XDG_DATA_HOME/plugin-circuit`); the package lock with `LockFileEx` (released
+before the folder is moved on delete; the loader checks the file identity) with a `package-cache` test; portable
+`setenv` in the SDK and tests; the catalog-health test's stand-in server on Winsock.
 
 Done when: Plugin Circuit (CLAP, VST3 and both standalone apps) installs and runs on Windows 10/11 x64 in at least
 three DAWs, with the same behaviour as on macOS (browse, load, GUI, macros, params, keyboard, settings), the C SDK
@@ -25,10 +35,10 @@ Paths are relative to the workspace `~/Code/work/plugin-circuit/` (this file is 
 ## W1. CI on Windows first
 
 Without a Windows machine in the loop, CI is how we find out what breaks.
-- [ ] GitHub Actions job `windows-latest` (x64) for the plugin: configure, build core + tests, run the non-GUI
+- [x] GitHub Actions job (`windows-2022`, x64) for the plugin: configure, build core + tests, run the non-GUI
       tests (param-table, gestures, api, settings, dropout-concealer, catalog-health, plugin-errors,
       plugin-param-events, main-thread-block with the test WCLAPs).
-- [ ] Toolchain: MSVC (VS 2022, the default on the runner) first; clang-cl later if needed. C++20.
+- [x] Toolchain: MSVC (VS 2022, the default on the runner) first; clang-cl later if needed. C++20.
 - [ ] The test WCLAPs (`plugin/tests/wclaps`) need clang with the wasm32 target and `wasm-ld`: on Windows use LLVM
       from the runner, or build them once on Linux/macOS and use the artifacts.
 - [ ] Cost: Actions minutes on private repos count double on Windows (2,000 free minutes a month on the Free plan);
@@ -38,14 +48,14 @@ Without a Windows machine in the loop, CI is how we find out what breaks.
 ## W2. The core compiles and runs on Windows
 
 From the backlog and a grep (verify each; don't assume):
-- [ ] `Paths::root()` uses `$HOME/Library/Application Support/Plugin Circuit`: Windows `%APPDATA%\Plugin Circuit`
+- [x] `Paths::root()` uses `$HOME/Library/Application Support/Plugin Circuit`: Windows `%APPDATA%\Plugin Circuit`
       (`SHGetKnownFolderPath(FOLDERID_RoamingAppData)`); Linux `$XDG_DATA_HOME/plugin-circuit`.
-- [ ] `PackageCache` in-use lock is a no-op on Windows (`#if !defined(_WIN32)` around `flock`): `LockFileEx` /
+- [x] `PackageCache` in-use lock is a no-op on Windows (`#if !defined(_WIN32)` around `flock`): `LockFileEx` /
       `UnlockFileEx` on `<package>/.lock`, shared for "in use", exclusive for delete.
-- [ ] `PluginCircuitC.cpp`: `setenv` → `_putenv_s` (or pass the cache dir without the environment).
+- [x] `PluginCircuitC.cpp`: `setenv` → `_putenv_s` (or pass the cache dir without the environment).
 - [ ] Every `std::filesystem::path` to string conversion: UTF-8 on Windows needs `u8string()` / `path(u8string)`
       (user names with non-ASCII characters break `.string()`).
-- [ ] tanh-net: the WinHTTP backend exists (`HttpClient_windows.cpp`); test HTTPS, redirects, proxies, progress.
+- [x] tanh-net: the WinHTTP backend exists (`HttpClient_windows.cpp`); test HTTPS, redirects, proxies, progress.
 - [ ] Wasmtime C API for Windows x64 (and ARM64): check the bridge's CMake downloads the right archive.
 - [ ] `realtime-lock.h` `cpuRelax` on MSVC (`_mm_pause` / `__yield`), `steady_clock` (QueryPerformanceCounter).
 - [ ] Compile cache folder, `settings.json` atomic rename (`MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`; is

@@ -2,10 +2,24 @@
 // while an editor wants them, the thread joined at shutdown. A one-route HTTP server stands in for the catalog.
 #include "core/CatalogHealth.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#	define WIN32_LEAN_AND_MEAN
+#	include <winsock2.h>
+#	include <ws2tcpip.h>
+#	pragma comment(lib, "ws2_32.lib")
+using socket_t = SOCKET;
+static void closeSocket(socket_t s) { closesocket(s); }
+static bool invalid(socket_t s) { return s == INVALID_SOCKET; }
+using socklen_t = int;
+#else
+#	include <arpa/inet.h>
+#	include <netinet/in.h>
+#	include <sys/socket.h>
+#	include <unistd.h>
+using socket_t = int;
+static void closeSocket(socket_t s) { close(s); }
+static bool invalid(socket_t s) { return s < 0; }
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -28,14 +42,19 @@ static int failures = 0;
 
 // answers every request with 200 until stopped; counts them
 struct Server {
-	int fd = -1, port = 0;
+	socket_t fd{};
+	int port = 0;
 	std::atomic<bool> stop{false};
 	std::atomic<int> requests{0};
 	std::thread t;
 	void start() {
+#if defined(_WIN32)
+		WSADATA wsa;
+		WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
 		fd = socket(AF_INET, SOCK_STREAM, 0);
 		int one = 1;
-		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
 		sockaddr_in a{};
 		a.sin_family = AF_INET;
 		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -51,14 +70,14 @@ struct Server {
 				fd_set set;
 				FD_ZERO(&set);
 				FD_SET(fd, &set);
-				if (select(fd + 1, &set, nullptr, nullptr, &tv) <= 0) continue;
-				int c = accept(fd, nullptr, nullptr);
-				if (c < 0) continue;
+				if (select(int(fd) + 1, &set, nullptr, nullptr, &tv) <= 0) continue; // the first argument is ignored on Windows
+				socket_t c = accept(fd, nullptr, nullptr);
+				if (invalid(c)) continue;
 				char buf[2048];
-				(void)read(c, buf, sizeof(buf));
+				(void)recv(c, buf, sizeof(buf), 0);
 				const char *reply = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}";
-				(void)write(c, reply, strlen(reply));
-				close(c);
+				(void)send(c, reply, int(strlen(reply)), 0);
+				closeSocket(c);
 				++requests;
 			}
 		});
@@ -66,7 +85,7 @@ struct Server {
 	void halt() {
 		stop = true;
 		if (t.joinable()) t.join();
-		close(fd);
+		closeSocket(fd);
 	}
 };
 

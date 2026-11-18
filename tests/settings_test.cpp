@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
-#include <unistd.h>
+#include <random>
 
 using namespace plugincircuit;
 
@@ -98,7 +98,7 @@ int main() {
 
 	// ---- machine settings: one copy per process; another process's write is picked up
 	{
-		auto home = fs::temp_directory_path() / ("plugincircuit-settings-test-" + std::to_string(::getpid()));
+		auto home = fs::temp_directory_path() / ("plugincircuit-settings-test-" + std::to_string(std::random_device{}()));
 		fs::remove_all(home);
 		fs::create_directories(home);
 		setenv("PLUGINCIRCUIT_HOME", home.c_str(), 1);

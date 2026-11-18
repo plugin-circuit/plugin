@@ -32,7 +32,6 @@
 #include <wclap-bridge.h> // our fork's audio-wait API (wclap_set_audio_wait_ratio etc.)
 
 #include <cstdlib>
-#include <unistd.h>
 
 using namespace plugincircuit;
 using clock_type = std::chrono::steady_clock;

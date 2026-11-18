@@ -16,6 +16,7 @@
 // Reports the worst process() time, blocks slower than real time (a device underrun: what you hear as a click or
 // gap) and blocks the bridge skipped. Passes if no block was slower than real time.
 #include "core/InnerHost.h"
+#include "core/Util.h"
 #include "core/WclapLibrary.h"
 
 #include <algorithm>
@@ -26,6 +27,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <random>
 #include <thread>
 #include <vector>
 
@@ -90,12 +92,18 @@ int main(int argc, char **argv) {
 	const bool hasWaitApi = true;
 	// a scratch Plugin Circuit folder: opening the bridge writes its compile-cache config and cleans the package cache
 	// there, and applies settings.json (which must not override this tool's arguments)
-	char home[] = "/tmp/plugincircuit-block-test-XXXXXX";
-	if (!mkdtemp(home)) {
-		std::fprintf(stderr, "mkdtemp failed\n");
+	const auto home = fs::temp_directory_path() / ("plugincircuit-block-test-" + std::to_string(std::random_device{}()));
+	std::error_code ec;
+	fs::create_directories(home, ec);
+	if (ec) {
+		std::fprintf(stderr, "can't create %s\n", home.string().c_str());
 		return 1;
 	}
-	setenv("PLUGINCIRCUIT_HOME", home, 1);
+#if defined(_WIN32)
+	_putenv_s("PLUGINCIRCUIT_HOME", home.string().c_str());
+#else
+	setenv("PLUGINCIRCUIT_HOME", home.c_str(), 1);
+#endif
 
 	std::string error;
 	auto module = WclapLibrary::open(bundle, "", error);

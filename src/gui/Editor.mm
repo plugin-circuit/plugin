@@ -3,9 +3,12 @@
 #include "core/PackageCache.h"
 #include "core/Settings.h"
 #include "api/Api.h"
+#include "core/Catalog.h"
 #include "core/CatalogHealth.h"
 
 #include <wclap-bridge.h>
+
+#include <fstream>
 
 #include "plugin/PluginCircuitPlugin.h"
 
@@ -394,7 +397,17 @@ struct Editor::Impl {
 	void debugHooks() {
 		++ticks;
 		if (ticks == 10) {
-			if (const char *id = std::getenv("PLUGINCIRCUIT_AUTOLOAD")) plugin.uiLoad(id, "");
+			// PLUGINCIRCUIT_AUTOLOAD_ARCHIVE=<.wclap.tar.gz>: install a local bundle first, then load PLUGINCIRCUIT_AUTOLOAD
+			// from it (no catalog needed: test WCLAPs)
+			std::string sha;
+			if (const char *archive = std::getenv("PLUGINCIRCUIT_AUTOLOAD_ARCHIVE")) {
+				std::ifstream f(archive, std::ios::binary);
+				std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+				std::string error;
+				if (Catalog::installArchive(bytes, sha, error).empty())
+					std::fprintf(stderr, "[plugincircuit] PLUGINCIRCUIT_AUTOLOAD_ARCHIVE: %s\n", error.c_str());
+			}
+			if (const char *id = std::getenv("PLUGINCIRCUIT_AUTOLOAD")) plugin.uiLoad(id, sha);
 			if (const char *v = std::getenv("PLUGINCIRCUIT_VIEW")) setView(v);
 		}
 		// PLUGINCIRCUIT_UI_JS=<js>: run once in the host UI after the autoload settled (debug only)

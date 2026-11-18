@@ -23,6 +23,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <string>
+#include <vector>
 
 namespace {
 enum class Mode { Wrapper, Vst3, Async, Refuse };
@@ -90,6 +91,58 @@ const clap_host_params hostParams{
 		});
 	},
 };
+
+// the hosted plugin's page: the WKWebView showing a webview-gui: URL (ours shows choc://)
+static WKWebView *findPluginWeb(NSView *v) {
+	if ([v isKindOfClass:[WKWebView class]] && [((WKWebView *)v).URL.scheme isEqualToString:@"webview-gui"]) return (WKWebView *)v;
+	for (NSView *c in v.subviews)
+		if (WKWebView *w = findPluginWeb(c)) return w;
+	return nil;
+}
+
+// a click on the element with this id in the plugin's page, run by the app through evaluateJavaScript: WebKit treats
+// script the app evaluates as user input (it has separate SPI to run script without a user gesture), so downloads,
+// file pickers and the clipboard behave as for a real click. (Synthesized NSEvents sent to the window don't reach
+// the page.)
+static void clickInPluginPage(NSWindow *window, const std::string &elementId) {
+	WKWebView *web = findPluginWeb(window.contentView);
+	if (!web) {
+		std::fprintf(stderr, "[test %.1f] click %s: no plugin page\n", NSProcessInfo.processInfo.systemUptime, elementId.c_str());
+		return;
+	}
+	const std::string name = elementId; // the block keeps a copy
+	NSString *js = [NSString stringWithFormat:@"(() => { const e = document.getElementById('%@'); if (!e) return false; e.click(); return true })()",
+	                                          [NSString stringWithUTF8String:name.c_str()]];
+	[web evaluateJavaScript:js completionHandler:^(id result, NSError *error) {
+		std::fprintf(stderr, "[test %.1f] %s %s%s\n", NSProcessInfo.processInfo.systemUptime,
+		             [result isKindOfClass:[NSNumber class]] && [result boolValue] ? "clicked" : "no element", name.c_str(),
+		             error ? (" (" + std::string(error.localizedDescription.UTF8String) + ")").c_str() : "");
+	}];
+}
+
+// a dialog the page opened (file open or save panel, alert): logged and cancelled, so the run never blocks on it.
+// Scheduled in the modal panel run loop mode too: a modal dialog runs its own loop.
+static void watchModals() {
+	NSTimer *t = [NSTimer timerWithTimeInterval:0.3 repeats:YES block:^(NSTimer *) {
+		NSWindow *m = NSApp.modalWindow;
+		if (!m) return;
+		static NSWindow *logged = nil;
+		if (m != logged) {
+			logged = m;
+			NSString *title = m.title.length ? m.title : @"";
+			if ([m isKindOfClass:[NSSavePanel class]]) title = [NSString stringWithFormat:@"%@ %@", title, ((NSSavePanel *)m).nameFieldStringValue];
+			std::fprintf(stderr, "[test %.1f] modal %s \"%s\"\n", NSProcessInfo.processInfo.systemUptime, NSStringFromClass([m class]).UTF8String, title.UTF8String);
+		}
+		// File panels are always cancelled (the page's results and the panel's title are what a test checks; driving a
+		// save panel to a folder isn't reliable and would write into the user's last folder). PLUGINCIRCUIT_TEST_ACCEPT=1:
+		// alerts get their first button (OK), so confirm() and prompt() answers can be checked; otherwise they're aborted.
+		if ([m isKindOfClass:[NSSavePanel class]]) [(NSSavePanel *)m cancel:nil]; // NSOpenPanel is a save panel too
+		else if (std::getenv("PLUGINCIRCUIT_TEST_ACCEPT")) [NSApp stopModalWithCode:NSAlertFirstButtonReturn];
+		else [NSApp abortModal];
+	}];
+	[[NSRunLoop currentRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
+	[[NSRunLoop currentRunLoop] addTimer:t forMode:NSModalPanelRunLoopMode];
+}
 
 const void *getExt(const clap_host *, const char *id) {
 	if (!std::strcmp(id, CLAP_EXT_PARAMS)) return &hostParams;
@@ -189,7 +242,10 @@ int main(int argc, char **argv) {
 
 	@autoreleasepool {
 		[NSApplication sharedApplication];
-		[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+		// PLUGINCIRCUIT_TEST_INTERACTIVE=1: a normal app (Dock icon, activated, key window) so a person can use the
+		// window (e.g. the web-features test page); otherwise an accessory app that stays out of the way
+		const bool interactive = std::getenv("PLUGINCIRCUIT_TEST_INTERACTIVE") != nullptr;
+		[NSApp setActivationPolicy:interactive ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory];
 
 		std::string bin = std::string(argv[1]) + "/Contents/MacOS/PluginCircuit";
 		void *lib = dlopen(bin.c_str(), RTLD_NOW);
@@ -212,6 +268,10 @@ int main(int argc, char **argv) {
 		if (!gui->set_parent(plugin, &cw)) { std::printf("set_parent failed\n"); return 1; }
 		gui->show(plugin);
 		[window orderFrontRegardless];
+		if (interactive) {
+			[NSApp activateIgnoringOtherApps:YES];
+			[window makeKeyAndOrderFront:nil];
+		}
 
 		// the "user" drags the window near the end: sizes through adjust_size, like a host's live resize
 		const double dragAt = seconds - 4;
@@ -227,6 +287,7 @@ int main(int argc, char **argv) {
 
 		// check every 50 ms; a broken invariant fails once it lasts longer than 150 ms (a host's async resize may
 		// leave a frame or two in between)
+		if (std::getenv("PLUGINCIRCUIT_TEST_CLICKS")) watchModals();
 		__block int ticks = 0, streak = 0, failures = 0, sizeChanges = 0;
 		__block bool innerShown = false, fillChecked = false;
 		__block NSSize lastSize = window.contentView.bounds.size;
@@ -242,6 +303,23 @@ int main(int argc, char **argv) {
 				static const clap_output_events out{nullptr, [](const clap_output_events *, const clap_event_header *) { return true; }};
 				auto *params = (const clap_plugin_params *)plugin->get_extension(plugin, CLAP_EXT_PARAMS);
 				if (params && params->flush) params->flush(plugin, &in, &out);
+			}
+			// PLUGINCIRCUIT_TEST_CLICKS=<id>,<id>,...: from PLUGINCIRCUIT_TEST_CLICKS_AT seconds (default 6), every 1.5 s, a
+			// real click (mouse down and up sent to the window, so WebKit sees user input) on the element with that id in
+			// the hosted plugin's page (docs/WCLAP_FEATURES.md: the web-features test WCLAP)
+			if (const char *clicks = std::getenv("PLUGINCIRCUIT_TEST_CLICKS")) {
+				const double at = std::getenv("PLUGINCIRCUIT_TEST_CLICKS_AT") ? std::atof(std::getenv("PLUGINCIRCUIT_TEST_CLICKS_AT")) : 6;
+				const int first = int(at / 0.05), every = 30;
+				if (ticks >= first && (ticks - first) % every == 0) {
+					std::vector<std::string> ids;
+					for (std::string rest = clicks; !rest.empty();) {
+						const auto comma = rest.find(',');
+						ids.push_back(rest.substr(0, comma));
+						rest = comma == std::string::npos ? "" : rest.substr(comma + 1);
+					}
+					const size_t n = size_t((ticks - first) / every);
+					if (n < ids.size()) clickInPluginPage(window, ids[n]);
+				}
 			}
 			NSSize s = window.contentView.bounds.size;
 			if (s.width != lastSize.width || s.height != lastSize.height) ++sizeChanges;

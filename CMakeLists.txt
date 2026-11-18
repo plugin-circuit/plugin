@@ -40,7 +40,7 @@ FetchContent_Declare(wclap-bridge
 	# Our fork: upstream WebCLAP/wclap-bridge plus our fixes, one commit each, on the plugin-circuit branch (its
 	# webview-gui submodule points at our webview-gui fork). See docs/UPSTREAM.md.
 	GIT_REPOSITORY https://github.com/plugin-circuit/wclap-bridge
-	GIT_TAG 6f6e08df613d3b1d83bcadd40bf456301f6cebed
+	GIT_TAG f33cd85057e9015908e9da22a2a5c38a4f5fde35
 	GIT_SUBMODULES_RECURSE ON
 	UPDATE_DISCONNECTED ON
 	SOURCE_SUBDIR do-not-add) # added manually below, after clap-wrapper
@@ -173,6 +173,7 @@ if (APPLE AND EXISTS /opt/homebrew/opt/llvm/bin/clang AND WASM_LD_EXECUTABLE)
 			bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/build.sh
 		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/src/plugin.c ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/src/rt.c
 			${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/build.sh
+			${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/ui/gain/index.html ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/ui/features/index.html
 		COMMENT "Building the test WCLAPs")
 	add_custom_target(test-wclaps ALL DEPENDS ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz)
 	if (PLUGINCIRCUIT_BUILD_PLUGIN)
@@ -261,6 +262,15 @@ if (PLUGINCIRCUIT_BUILD_PLUGIN AND APPLE)
 	set_tests_properties(ui-daw-notes PROPERTIES LABELS gui RUN_SERIAL TRUE TIMEOUT 30
 		ENVIRONMENT "PLUGINCIRCUIT_TEST_DAW_NOTE_AT=9.5;PLUGINCIRCUIT_UI_JS=state.snap.plugin = { id: 'stand.in', name: 'Stand-in', noteInput: true }, showKeyboard(true), setTimeout(() => api.command('app.log', { text: 'daw keys [' + [...document.querySelectorAll('#keys .key.daw')].map((e) => e.dataset.key).join(' ') + ']' }), 2500)"
 		PASS_REGULAR_EXPRESSION "daw keys \\[60\\]")
+	# what a plugin page can do in our webview (docs/WCLAP_FEATURES.md): the web-features test WCLAP, loaded from its
+	# archive (no catalog), its buttons clicked; file panels are cancelled, alerts accepted (PLUGINCIRCUIT_TEST_ACCEPT)
+	if (TARGET test-wclaps)
+		add_test(NAME webview-features COMMAND plugincircuit-editor-resize-test ${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap refuse
+			studio.plugincircuit.test.web-features 16)
+		set_tests_properties(webview-features PROPERTIES LABELS gui RUN_SERIAL TRUE TIMEOUT 60
+			ENVIRONMENT "PLUGINCIRCUIT_HOME=${CMAKE_BINARY_DIR}/webview-features-home;PLUGINCIRCUIT_API=http://127.0.0.1:9;PLUGINCIRCUIT_AUTOLOAD=studio.plugincircuit.test.web-features;PLUGINCIRCUIT_AUTOLOAD_ARCHIVE=${TEST_WCLAPS_DIR}/dist/test-web-features.wclap.tar.gz;PLUGINCIRCUIT_SNAPSHOT=${CMAKE_BINARY_DIR}/webview-features.png;PLUGINCIRCUIT_TEST_ACCEPT=1;PLUGINCIRCUIT_TEST_CLICKS=copy,download,filepick,file,dialogs"
+			PASS_REGULAR_EXPRESSION "modal NSSavePanel \"Save web-features-test.txt\".*modal NSOpenPanel.*copy=ok.*alert=shown. confirm=true. prompt=\"default\"")
+	endif()
 endif()
 
 # --- libplugincircuit: the C SDK for third-party hosts (MVP step 3) -----------------------------

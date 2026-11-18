@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Test Web Features</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14171c; color: #e8e6e1; font: 12px/1.35 system-ui, sans-serif; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 12px; box-sizing: border-box; height: 100%; }
+  h1 { grid-column: 1 / -1; font-size: 13px; margin: 0; }
+  section { display: flex; flex-direction: column; gap: 5px; }
+  button, label.btn { font: inherit; padding: 5px 8px; border: 0; border-radius: 5px; background: #2a2f37; color: inherit; cursor: pointer; text-align: left; }
+  #drop { border: 1px dashed #555; border-radius: 6px; padding: 10px; text-align: center; color: #8b8f97; }
+  #drop.over { border-color: #f2c94c; color: #f2c94c; }
+  textarea { font: inherit; background: #1d2128; color: inherit; border: 1px solid #333; border-radius: 5px; height: 34px; }
+  #log { grid-column: 1 / -1; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; overflow: auto; background: #0e1014; border-radius: 6px; padding: 8px; min-height: 110px; }
+  canvas { width: 40px; height: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Test Web Features <small id="where"></small></h1>
+  <section>
+    <button id="download">Download a file (blob, &lt;a download&gt;)</button>
+    <label class="btn">Open a file <input id="file" type="file" hidden></label>
+    <button id="filepick">Open a file (input created in JS)</button>
+    <button id="link">Open a link (_blank)</button>
+    <button id="winopen">window.open()</button>
+    <div id="drop">Drop a file here</div>
+  </section>
+  <section>
+    <button id="copy">Copy text (navigator.clipboard)</button>
+    <button id="paste">Paste text (navigator.clipboard)</button>
+    <textarea id="text" placeholder="copy / paste here, type keys">some text to copy</textarea>
+    <button id="dialogs">alert, confirm, prompt</button>
+    <button id="lock">Pointer lock (click, then Esc)</button>
+    <canvas id="gl" width="40" height="20"></canvas>
+  </section>
+  <div id="log"></div>
+</main>
+<script>
+  // Results go to window.__probe ("key=value; ..."), which the editor harness reads (PLUGINCIRCUIT_INNER_JS / the
+  // inner probe line), and to the log on the page. Automatic probes run at load; the buttons need a real click.
+  const results = {}
+  const log = document.getElementById("log")
+  const record = (key, value) => {
+    results[key] = String(value).replace(/[;\n]/g, ",")
+    window.__probe = Object.entries(results).map(([k, v]) => `${k}=${v}`).join("; ")
+    log.textContent += `${key}: ${value}\n`
+    log.scrollTop = log.scrollHeight
+  }
+  const send = (bytes) => window.parent.postMessage(bytes.buffer, "*")
+  const $ = (id) => document.getElementById(id)
+  document.getElementById("where").textContent = location.origin
+  // every pointer press, to tell "the click never arrived" from "it arrived without user activation"
+  document.addEventListener("pointerdown", (e) => record("pointer", `${e.target.id || e.target.tagName} trusted=${e.isTrusted}`), true)
+
+  // ---- automatic ----
+  record("origin", location.origin)
+  record("secure", window.isSecureContext)
+  record("clipboardApi", navigator.clipboard ? typeof navigator.clipboard.writeText : "missing")
+  record("savePickerApi", typeof window.showSaveFilePicker)
+  try {
+    const runs = Number(localStorage.getItem("webFeatures.runs") || 0) + 1
+    localStorage.setItem("webFeatures.runs", String(runs))
+    record("storageRuns", runs) // > 1 after reopening the editor: the store persists
+    record("storageShared", localStorage.getItem("spiral303.userPresets") === null ? "no-spiral303-key" : "sees-spiral303-key")
+  } catch (e) { record("storage", "error " + e.name) }
+  try { record("webgl2", $("gl").getContext("webgl2") ? "yes" : "no") } catch (e) { record("webgl2", "error " + e.name) }
+  record("pointerLockApi", typeof $("lock").requestPointerLock)
+  {
+    const t = performance.now()
+    let r
+    try { r = window.open("about:blank", "_blank") } catch (e) { r = "error " + e.name }
+    record("windowOpenNoGesture", r === null ? "null" : typeof r)
+    void t
+  }
+  send(new Uint8Array([0])) // hello: the DSP answers with the gain (proves messages work)
+  window.addEventListener("message", (event) => {
+    if (event.data instanceof ArrayBuffer && new DataView(event.data).getUint8(0) === 2) record("messages", "ok")
+  })
+
+  // ---- manual (a real click) ----
+  $("download").onclick = () => {
+    const url = URL.createObjectURL(new Blob(["Plugin Circuit web features test\n"], { type: "text/plain" }))
+    const a = Object.assign(document.createElement("a"), { href: url, download: "web-features-test.txt" })
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 5000)
+    record("download", "clicked (did a save dialog or a file appear?)")
+  }
+  const showFile = (key, files) => record(key, files && files.length ? `${files[0].name} ${files[0].size} B` : "none")
+  $("file").onchange = () => showFile("fileInput", $("file").files)
+  $("filepick").onclick = () => {
+    const picker = Object.assign(document.createElement("input"), { type: "file" })
+    picker.onchange = () => showFile("fileInputJs", picker.files)
+    picker.click()
+    record("fileInputJs", "clicked (did a dialog open?)")
+  }
+  $("link").onclick = () => {
+    const a = Object.assign(document.createElement("a"), { href: "https://plugincircuit.studio/", target: "_blank", rel: "noopener" })
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    record("linkBlank", "clicked (did the browser open?)")
+  }
+  $("winopen").onclick = () => {
+    const w = window.open("https://plugincircuit.studio/", "_blank")
+    record("windowOpen", w === null ? "null" : "window")
+  }
+  const drop = $("drop")
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over") }
+  drop.ondragleave = () => drop.classList.remove("over")
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); showFile("drop", e.dataTransfer.files) }
+  $("copy").onclick = async () => {
+    if (!navigator.clipboard) return record("copy", "no navigator.clipboard")
+    try { await navigator.clipboard.writeText($("text").value); record("copy", "ok") } catch (e) { record("copy", "error " + e.name) }
+  }
+  $("paste").onclick = async () => {
+    if (!navigator.clipboard) return record("paste", "no navigator.clipboard")
+    try { record("paste", "ok: " + (await navigator.clipboard.readText()).slice(0, 30)) } catch (e) { record("paste", "error " + e.name) }
+  }
+  $("dialogs").onclick = () => {
+    const t0 = performance.now()
+    alert("alert from the plugin page")
+    const t1 = performance.now()
+    const c = confirm("confirm: press OK")
+    const p = prompt("prompt: type something", "default")
+    // an unhandled alert returns at once: under 30 ms means no dialog was shown
+    record("alert", t1 - t0 < 30 ? "returned at once (no dialog)" : "shown")
+    record("confirm", c)
+    record("prompt", p === null ? "null" : JSON.stringify(p))
+  }
+  $("lock").onclick = () => {
+    try {
+      const r = $("lock").requestPointerLock()
+      if (r && r.then) r.then(() => record("pointerLock", "locked"), (e) => record("pointerLock", "refused " + e.name))
+      else setTimeout(() => record("pointerLock", document.pointerLockElement ? "locked" : "not locked"), 300)
+    } catch (e) { record("pointerLock", "error " + e.name) }
+  }
+  $("text").addEventListener("keydown", (e) => record("key", e.key))
+</script>
+</body>
+</html>

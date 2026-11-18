@@ -38,3 +38,4 @@ build test-lookahead     TEST_LOOKAHEAD
 build test-sine          TEST_SINE
 build test-broken-state  TEST_BROKEN_STATE
 build test-param-events  TEST_PARAM_EVENTS  ui/gain
+build test-web-features  TEST_WEB_FEATURES  ui/features

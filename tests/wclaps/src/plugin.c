@@ -7,6 +7,8 @@
 //                        sets Level to -6 dB and reports it (gesture begin, value, gesture end as output events);
 //                        key 61 sets it to -30 dB without reporting; key 62 traps; its page's "set gain" reports
 //                        with a gesture too
+//   -DTEST_WEB_FEATURES  stereo gain whose page (ui/features) probes the host webview: downloads, file inputs, drag and
+//                        drop, clipboard, links, storage, dialogs, pointer lock, WebGL (docs/WCLAP_FEATURES.md)
 // Freestanding wasm32: no libc, no WASI imports. Exports memory, clap_entry, malloc, free and the function table.
 #include <clap/clap.h>
 #include <clap/ext/draft/webview.h>
@@ -53,8 +55,23 @@
 #	define HAS_GUI 1
 #	define DELAY_SAMPLES 0
 #	define STATE_LOAD_FAILS 0
+#elif defined(TEST_WEB_FEATURES)
+#	define PLUGIN_ID "studio.plugincircuit.test.web-features"
+#	define PLUGIN_NAME "Test Web Features"
+#	define PLUGIN_DESC "Host test: a gain whose page probes what the host's webview offers (docs/WCLAP_FEATURES.md)."
+#	define IS_INSTRUMENT 0
+#	define HAS_GUI 1
+#	define DELAY_SAMPLES 0
+#	define STATE_LOAD_FAILS 0
+#	define GUI_W 560
+#	define GUI_H 460
 #else
-#	error "define one of TEST_GAIN, TEST_LOOKAHEAD, TEST_SINE, TEST_BROKEN_STATE, TEST_PARAM_EVENTS"
+#	error "define one of TEST_GAIN, TEST_LOOKAHEAD, TEST_SINE, TEST_BROKEN_STATE, TEST_PARAM_EVENTS, TEST_WEB_FEATURES"
+#endif
+
+#ifndef GUI_W
+#	define GUI_W 360
+#	define GUI_H 220
 #endif
 
 #if defined(TEST_PARAM_EVENTS)
@@ -471,11 +488,11 @@ static bool gui_create(const clap_plugin_t *p, const char *api, bool floating) {
 }
 static void gui_destroy(const clap_plugin_t *p) { self(p)->guiOpen = 0; }
 static bool gui_set_scale(const clap_plugin_t *p, double scale) { (void)p; (void)scale; return false; }
-static bool gui_get_size(const clap_plugin_t *p, uint32_t *w, uint32_t *h) { (void)p; *w = 360; *h = 220; return true; }
+static bool gui_get_size(const clap_plugin_t *p, uint32_t *w, uint32_t *h) { (void)p; *w = GUI_W; *h = GUI_H; return true; }
 static bool gui_can_resize(const clap_plugin_t *p) { (void)p; return false; }
 static bool gui_get_resize_hints(const clap_plugin_t *p, clap_gui_resize_hints_t *h) { (void)p; (void)h; return false; }
 static bool gui_adjust_size(const clap_plugin_t *p, uint32_t *w, uint32_t *h) { return gui_get_size(p, w, h); }
-static bool gui_set_size(const clap_plugin_t *p, uint32_t w, uint32_t h) { (void)p; return w == 360 && h == 220; }
+static bool gui_set_size(const clap_plugin_t *p, uint32_t w, uint32_t h) { (void)p; return w == GUI_W && h == GUI_H; }
 static bool gui_set_parent(const clap_plugin_t *p, const clap_window_t *w) { (void)p; (void)w; return true; }
 static bool gui_set_transient(const clap_plugin_t *p, const clap_window_t *w) { (void)p; (void)w; return false; }
 static void gui_suggest_title(const clap_plugin_t *p, const char *t) { (void)p; (void)t; }

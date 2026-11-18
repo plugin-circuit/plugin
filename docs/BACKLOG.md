@@ -25,7 +25,9 @@ in upstream code are listed in `UPSTREAM.md`.
 
 ## Platforms (Windows, Linux)
 
-Everything below is macOS-only or unverified today. Order: what blocks a Windows build first.
+Everything below is macOS-only or unverified today. Order: what blocks a Windows build first. The full plan, with
+the editor port and the rest: [WINDOWS.md](WINDOWS.md). The WCLAP features we don't support yet on either platform
+(export/download, clipboard, links, storage, preset discovery, ...): [WCLAP_FEATURES.md](WCLAP_FEATURES.md).
 
 1. **Editor.** `src/gui/Editor.mm` is macOS-only and compiled unconditionally, so the plugin doesn't build on Windows
    or Linux. Needed: `Editor_win.cpp` (child HWND + CHOC's WebView2 view), later Linux (X11 + WebKitGTK). With it, the

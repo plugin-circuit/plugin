@@ -110,7 +110,7 @@ int main() {
 		auto home = fs::temp_directory_path() / ("plugincircuit-settings-test-" + std::to_string(std::random_device{}()));
 		fs::remove_all(home);
 		fs::create_directories(home);
-		setEnv("PLUGINCIRCUIT_HOME", home.c_str());
+		setEnv("PLUGINCIRCUIT_HOME", home.string().c_str());
 		const auto file = home / "settings.json";
 		writeFile(file, R"({"audioWaitRatio": 0.4, "fromTheFuture": "keep me"})");
 

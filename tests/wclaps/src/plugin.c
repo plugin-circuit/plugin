@@ -5,7 +5,8 @@
 //   -DTEST_BROKEN_STATE  stereo effect whose state load always fails
 //   -DTEST_PARAM_EVENTS  instrument that changes its own parameter like a GUI does (for host tests): note-on key 60
 //                        sets Level to -6 dB and reports it (gesture begin, value, gesture end as output events);
-//                        key 61 sets it to -30 dB without reporting; its page's "set gain" reports with a gesture too
+//                        key 61 sets it to -30 dB without reporting; key 62 traps; its page's "set gain" reports
+//                        with a gesture too
 // Freestanding wasm32: no libc, no WASI imports. Exports memory, clap_entry, malloc, free and the function table.
 #include <clap/clap.h>
 #include <clap/ext/draft/webview.h>
@@ -188,6 +189,7 @@ static void handleEvent(Plugin *s, const clap_event_header_t *h) {
 			setValue(s, -30.0);
 			break;
 		}
+		if (e->key == 62) __builtin_trap(); // a crash: WebAssembly's `unreachable` (for the host's error reporting)
 #	endif
 		noteOn(s, e->port_index, e->channel, e->key, e->note_id, e->velocity);
 		break;

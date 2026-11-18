@@ -3,6 +3,7 @@
 #include "core/PackageCache.h"
 #include "core/Settings.h"
 #include "api/Api.h"
+#include "core/CatalogHealth.h"
 
 #include <wclap-bridge.h>
 
@@ -74,7 +75,7 @@ struct Editor::Impl {
 	bool pageReady = false; // the page said hello
 	id keyMonitor = nil; // copies note keys typed into the inner plugin's GUI to the on-screen keyboard
 
-	explicit Impl(PluginCircuitPlugin &p) : plugin(p) {}
+	explicit Impl(PluginCircuitPlugin &p) : plugin(p) { CatalogHealth::want(true); }
 
 	// --- inner plugin GUI ------------------------------------------------------------------------------
 	const clap_plugin_gui *innerGui() {
@@ -260,6 +261,7 @@ struct Editor::Impl {
 		uint32_t kb = open ? kKeyboardHeight : 0;
 		if (kb == keyboardHeight) return;
 		if (!open) plugin.uiAllNotesOff();
+		plugin.showDawNotes(open);
 		// grow the window rather than squeeze the plugin's GUI; if the host refuses, the strip takes the space
 		const uint32_t h = actualH() - keyboardHeight + kb;
 		keyboardHeight = kb;
@@ -325,6 +327,19 @@ struct Editor::Impl {
 			setView("browse");
 			return choc::value::Value(true);
 		});
+		// the catalog's reachability, checked by the core (CatalogHealth): online null until the first answer
+		api.store("app", {[] {
+			                  const auto h = CatalogHealth::status();
+			                  auto v = choc::value::createObject("App", "apiBase", h.apiBase, "error", h.error);
+			                  v.addMember("online", h.online < 0 ? choc::value::Value() : choc::value::Value(h.online == 1));
+			                  return v;
+		                  },
+		                  [] { return CatalogHealth::version(); },
+		                  {}});
+		api.command("app.checkCatalog", [](const choc::value::ValueView &, std::string &) {
+			CatalogHealth::checkNow();
+			return choc::value::Value(true);
+		});
 		api.command("app.log", [](const choc::value::ValueView &a, std::string &) {
 			if (a.isObject() && a.hasObjectMember("text") && a["text"].isString())
 				std::fprintf(stderr, "[plugincircuit ui] %s\n", std::string(a["text"].getString()).c_str());
@@ -357,6 +372,12 @@ struct Editor::Impl {
 		if (!web || !pageReady) return;
 		const auto t0 = std::chrono::steady_clock::now();
 		api.tick(std::chrono::duration<double>(t0.time_since_epoch()).count());
+		// the DAW's notes on the on-screen keyboard (queued by the audio thread while it is open)
+		auto notes = choc::value::createEmptyArray();
+		plugin.takeDawNotes([&](const PluginCircuitPlugin::DawNote &n) {
+			notes.addArrayElement(choc::value::createObject("N", "key", (int32_t)n.key, "on", n.on));
+		});
+		if (notes.size()) api.emit("keyboard.notes", std::move(notes));
 		if (static const bool dbg = std::getenv("PLUGINCIRCUIT_DEBUG_CALLS") != nullptr; dbg) {
 			static double worst = 0, sum = 0;
 			static int n = 0;
@@ -557,13 +578,14 @@ struct Editor::Impl {
 			{0x06, "KeyZ"}, {0x07, "KeyX"}};
 		for (auto &[keyCode, code] : kCodes)
 			if (e.keyCode == keyCode) {
-				web->evaluateJavascript(std::string("window.plugincircuitHost && window.plugincircuitHost.key && window.plugincircuitHost.key('") +
-				                        code + "', " + (down ? "true" : "false") + ")");
+				api.emit("keyboard.key", choc::value::createObject("Key", "code", code, "down", down));
 				return;
 			}
 	}
 
 	~Impl() {
+		CatalogHealth::want(false);
+		plugin.showDawNotes(false);
 		container.onResize = nil;
 		if (keyMonitor) [NSEvent removeMonitor:keyMonitor];
 		keyMonitor = nil;

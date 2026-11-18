@@ -86,6 +86,8 @@ add_library(plugincircuit-core STATIC
 	src/core/Catalog.cpp
 	src/core/PackageCache.cpp
 	src/core/Settings.cpp
+	src/core/CatalogHealth.cpp
+	src/core/BridgeLog.cpp
 	src/api/Api.cpp
 	src/api/SettingsSchema.cpp
 	src/core/Paths.cpp
@@ -171,6 +173,11 @@ if (APPLE AND EXISTS /opt/homebrew/opt/llvm/bin/clang AND WASM_LD_EXECUTABLE)
 		add_test(NAME plugin-param-events COMMAND plugincircuit-plugin-param-events-test
 			${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz)
 	endif()
+	# the bridge's diagnostics and a trapping WCLAP (PLAN.md 5.2)
+	add_executable(plugincircuit-plugin-errors-test tests/plugin_errors_test.cpp)
+	target_link_libraries(plugincircuit-plugin-errors-test PRIVATE plugincircuit-core)
+	add_dependencies(plugincircuit-plugin-errors-test test-wclaps)
+	add_test(NAME plugin-errors COMMAND plugincircuit-plugin-errors-test ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz)
 endif()
 add_executable(plugincircuit-param-table-test tests/param_table_test.cpp)
 target_include_directories(plugincircuit-param-table-test PRIVATE src ${wclap-bridge_SOURCE_DIR}/modules/clap/include)
@@ -188,6 +195,11 @@ add_executable(plugincircuit-settings-test tests/settings_test.cpp src/plugin/St
 target_include_directories(plugincircuit-settings-test PRIVATE src)
 target_link_libraries(plugincircuit-settings-test PRIVATE plugincircuit-core)
 add_test(NAME settings COMMAND plugincircuit-settings-test)
+# the catalog check behind the app store (PLAN.md 5.1), against a local stand-in server
+add_executable(plugincircuit-catalog-health-test tests/catalog_health_test.cpp)
+target_include_directories(plugincircuit-catalog-health-test PRIVATE src)
+target_link_libraries(plugincircuit-catalog-health-test PRIVATE plugincircuit-core)
+add_test(NAME catalog-health COMMAND plugincircuit-catalog-health-test)
 # host UI: only the catalog's picker iframe may load plugins (headless Chromium, via the website's Playwright)
 find_program(BUN_EXECUTABLE bun)
 if (BUN_EXECUTABLE AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../website/node_modules/@playwright/test)
@@ -232,6 +244,12 @@ if (PLUGINCIRCUIT_BUILD_PLUGIN AND APPLE)
 		# the core acknowledges the end in the params store (PLAN 2.4); logged to stderr, before the DAW's events
 		ENVIRONMENT "PLUGINCIRCUIT_UI_JS=const receive = api.receive, acked = (m) => m.kind === 'patch' && m.topic === 'params' && (m.data.ended || []).some((e) => e.target === 'macro' && e.id === 0), x = (api.receive = (m) => (acked(m) && api.command('app.log', { text: 'acked m0' }), receive(m))), y = setTimeout(() => (edit('macro', 0, 0.2, 'begin'), edit('macro', 0, 0.5, 'update'), edit('macro', 0, 0.6, 'end')), 500)"
 		PASS_REGULAR_EXPRESSION "acked m0.*daw events: \\[B0 D0=0.2 D0=0.5 D0=0.6 E0\\]")
+	# the DAW's notes on the on-screen keyboard (PLAN.md 5.4): the keyboard opens, the DAW plays key 60 at 9.5 s. The
+	# page shows the keyboard only for a plugin with note input: one stands in (no catalog here); the core path is real.
+	add_test(NAME ui-daw-notes COMMAND plugincircuit-editor-resize-test ${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap wrapper "" 11)
+	set_tests_properties(ui-daw-notes PROPERTIES LABELS gui RUN_SERIAL TRUE TIMEOUT 30
+		ENVIRONMENT "PLUGINCIRCUIT_TEST_DAW_NOTE_AT=9.5;PLUGINCIRCUIT_UI_JS=state.snap.plugin = { id: 'stand.in', name: 'Stand-in', noteInput: true }, showKeyboard(true), setTimeout(() => api.command('app.log', { text: 'daw keys [' + [...document.querySelectorAll('#keys .key.daw')].map((e) => e.dataset.key).join(' ') + ']' }), 2500)"
+		PASS_REGULAR_EXPRESSION "daw keys \\[60\\]")
 endif()
 
 # --- libplugincircuit: the C SDK for third-party hosts (MVP step 3) -----------------------------

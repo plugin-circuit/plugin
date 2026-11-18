@@ -90,7 +90,7 @@ void PluginCircuitPlugin::registerApi(Api &api) {
 		                     }
 		                     auto v = choc::value::createObject("Plugin", "status", std::string(statusNames[status_.load()]), "message", message,
 		                                                        "progress", downloadProgress_.load(), "instrument", instrument_,
-		                                                        "apiBase", Paths::apiBase());
+		                                                        "apiBase", Paths::apiBase(), "moduleError", moduleError());
 		                     if (current_) {
 			                     auto &m = current_->meta;
 			                     auto *inner = current_->inner.get();
@@ -121,6 +121,15 @@ void PluginCircuitPlugin::registerApi(Api &api) {
 		                     return Api::mix(Api::mix(stateVersion_.load(), uint64_t(status_.load())), std::bit_cast<uint64_t>(downloadProgress_.load()));
 	                     },
 	                     {}});
+
+	// ---- plugin.errors: recent load failures, the module's error (a trap), the bridge's diagnostics (PLAN 5.2)
+	api.store("plugin.errors", {[this] { return choc::value::createObject("Errors", "errors", errorsValue()); },
+	                            [this] { return errorsVersion(); },
+	                            {}});
+	api.command("plugin.clearErrors", [this](const View &, std::string &) {
+		clearErrors();
+		return Value(true);
+	});
 
 	// ---- params: infos and values; deltas from the table's changed bits
 	api.deltaStore("params", {[this] {

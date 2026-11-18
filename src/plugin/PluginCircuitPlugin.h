@@ -9,6 +9,7 @@
 //  - Loading (fetch metadata, download, verify, extract, compile wasm) runs on a worker thread;
 //    creating/activating the inner plugin happens back on the main thread.
 #include "api/SettingsSchema.h"
+#include "core/BridgeLog.h"
 #include "core/Catalog.h"
 #include "core/InnerHost.h"
 #include "core/PackageCache.h"
@@ -242,6 +243,17 @@ private:
 	choc::fifo::SingleReaderSingleWriterFIFO<UiEvent> uiNotes_; // own queue: parameter flushes never drain notes
 	std::mutex uiPushMutex_; // UI pushes come from the main thread only, but keep pushes serialised
 	std::bitset<128> uiHeldNotes_; // main thread: notes the UI has started and not yet released
+	// DAW notes for the on-screen keyboard (PLAN 5.4): pushed by translateEvents while showDawNotes_, drained by the
+	// editor. key -1: all notes off (a wildcard note-off, or the keyboard's queue overflowed).
+public:
+	struct DawNote {
+		int16_t key;
+		bool on;
+	};
+
+private:
+	choc::fifo::SingleReaderSingleWriterFIFO<DawNote> dawNotes_;
+	std::atomic<bool> showDawNotes_{false}, dawNotesOverflow_{false};
 	// A drag's end is acknowledged once the audio side has applied it (docs/PLAN.md 2.4): uiEvents_ is FIFO, so an
 	// end pushed as event n is applied when uiEventsApplied_ reaches n. The params store reports it as `ended`.
 	std::atomic<uint64_t> uiEventsApplied_{0}; // [audio-thread] writes
@@ -254,6 +266,16 @@ private:
 	std::deque<PendingEnd> pendingEnds_; // main thread
 	choc::value::Value takeEnded();       // main thread: the ends applied since the last call
 
+	struct ErrorEntry {
+		double time; // ms since the epoch
+		std::string source, message;
+	};
+	std::mutex errorsMutex_;
+	std::deque<ErrorEntry> errors_;
+	std::atomic<uint64_t> errorsVersion_{1};
+	uint64_t bridgeCursor_ = bridgelog::end(); // main thread: what this instance has read of the bridge's log
+	std::string lastModuleError_;              // main thread: reported once
+
 	// instance-scope settings (src/api/SettingsSchema.h), main thread; saved in our state
 	choc::value::Value instance_ = settings::defaults(Scope::Instance);
 	uint64_t instanceVersion_ = 1;
@@ -263,6 +285,26 @@ public:
 	uint64_t instanceVersion() const { return instanceVersion_; }
 	void setInstance(const choc::value::ValueView &stored);         // from a state: sanitized
 	std::string changeInstance(const choc::value::ValueView &change); // from the page: validated; "" or the error
+	// Recent errors (PLAN 5.2): load failures ("load"), the module's own error, e.g. a trap ("plugin"), the bridge's
+	// diagnostics ("bridge": process-wide, any instance's). Any thread but the audio thread.
+	void reportError(const std::string &source, const std::string &message);
+	choc::value::Value errorsValue();
+	uint64_t errorsVersion() const { return errorsVersion_.load(); }
+	void clearErrors();
+	std::string moduleError() const; // main thread: the loaded module's error, "" while it runs
+	// main thread: the editor shows DAW notes on its keyboard (while open), and drains them each tick
+	void showDawNotes(bool on);
+	void noteForKeyboard(const clap_event_header *h); // [audio-thread]
+	template <typename F> void takeDawNotes(F &&f) {
+		DawNote n;
+		if (dawNotesOverflow_.exchange(false)) { // a note was dropped (maybe an off): clear the keyboard, not relight it
+			while (dawNotes_.pop(n)) {
+			}
+			f(DawNote{-1, false});
+			return;
+		}
+		while (dawNotes_.pop(n)) f(n);
+	}
 
 private:
 

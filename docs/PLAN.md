@@ -230,6 +230,31 @@ change; a file written by "another process" (the test) is picked up.
 
 ## Phase 5: the remaining channels — M
 
+Status: done, except 5.5's version field (below). Decisions:
+- 5.1: `CatalogHealth` is one check per process on its own thread (not the loader's: loads are per instance), run
+  only while an editor is open (no network traffic without one), every 30 s online, backed off 2 ... 60 s offline;
+  the thread exits when the last editor closes and is joined at the entry's deinit or at exit. The `app` store is
+  the editor's; Try again is `app.checkCatalog`.
+- 5.2: the bridge's own log (a trap's message, refused resources) still goes to stderr: the pinned bridge has no
+  log API, and we wait for upstream's rather than add one to the fork. Ready for it: a fixed lock-free ring
+  (`core/BridgeLog`, 64 messages of 480 bytes, a seqlock per slot; a bridge may log on the audio thread) that each
+  instance's housekeeping reads into `plugin.errors` ("bridge"; process-wide, so every instance lists them). Open:
+  `bridgelog::install()` to call upstream's API once it exists. The module's own error (sticky
+  in the bridge) is polled in housekeeping and shown as `moduleError` in the `plugin` store: the plugin view says
+  the plugin stopped, with the errors under Details, and Retry loads it again; a module with an error is never
+  shared with a new load. Polling takes the bridge's group lock, which processing only takes on an error.
+- 5.3: `Api::emit` sends `{kind: "event", topic, data}`; `api.onEvent` on the page.
+- 5.4: built as `keyboard.notes` events (not a sampled stream): the audio thread queues DAW notes (note on/off,
+  MIDI note on/off, all-notes-off) only while the keyboard is open; a full queue drops the note and later clears
+  the keyboard. A DAW note is lit lighter than one played on the keyboard.
+- 5.5: the contract was already in the website's `docs/API.md`, and `site.e2e.ts` already pinned the select
+  message's keys; a cancel test was added. The version field is not added: the website's AGENTS.md forbids changing
+  the postMessage contract, and the pinned keys would change. Open, for a decision.
+Tests: `catalog-health` (a stand-in server: offline, online, checks only while wanted, the thread stopped),
+`plugin-errors` (the ring under concurrent writers; the test WCLAP traps on key 62: the module's error), `plugin-param-events` (after a trap the plugin keeps processing and its state saves),
+`ui-daw-notes` (a DAW note through the real core lights key 60), `host-ui-stores` (offline / online from the app
+store, events, the stopped-plugin card), website `site.e2e.ts` (the picker's cancel message).
+
 **5.1 `app` store**: online / offline decided by the core (a health check on the loader's thread, backed off), API
 base; the page stops fetching `/v1/health`.
 

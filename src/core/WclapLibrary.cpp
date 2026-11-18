@@ -1,5 +1,7 @@
 #include "core/WclapLibrary.h"
 
+#include "core/BridgeLog.h"
+
 #include "core/PackageCache.h"
 #include "core/Settings.h"
 
@@ -46,6 +48,7 @@ bool WclapLibrary::ensureGlobalInit(std::string &error) {
 	// The bridge prefixes ids/names by default in its own plugin; we want the WCLAP's real ids.
 	wclap_set_strings("", "", "");
 	PackageCache::dropArchives();
+	bridgelog::install(); // its errors and traps reach plugin.errors, not just stderr
 	// compiled modules go to our own folder, with a size limit (Wasmtime prunes it)
 	if (!wclap_global_init_with_cache(0, PackageCache::writeCompileCacheConfig().c_str())) {
 		error = "wclap_global_init failed";
@@ -56,9 +59,15 @@ bool WclapLibrary::ensureGlobalInit(std::string &error) {
 	return true;
 }
 
+std::string WclapModule::error() const {
+	char buffer[1024] = {0};
+	return handle_ && wclap_get_error(handle_, buffer, sizeof(buffer)) ? std::string(buffer) : std::string();
+}
+
 std::shared_ptr<WclapModule> WclapLibrary::open(const std::string &bundleDir, const std::string &dataDir, std::string &error) {
 	std::unique_lock<std::mutex> lock(libraryMutex);
-	if (auto existing = openModules[bundleDir].lock()) return existing;
+	// shared while it runs; one that trapped stays broken (its error is sticky): a reload gets a fresh module
+	if (auto existing = openModules[bundleDir].lock(); existing && existing->error().empty()) return existing;
 	if (!ensureGlobalInit(error)) return nullptr;
 
 	std::string presets, cache, var;

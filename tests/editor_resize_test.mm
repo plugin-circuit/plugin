@@ -233,6 +233,16 @@ int main(int argc, char **argv) {
 		__block std::string lastError;
 		NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *t) {
 			++ticks;
+			// PLUGINCIRCUIT_TEST_DAW_NOTE_AT=<s>: the DAW sends a note-on for key 60 then (through a flush, as no audio
+			// runs here), for a check that the on-screen keyboard shows it (PLAN 5.4)
+			if (const char *at = std::getenv("PLUGINCIRCUIT_TEST_DAW_NOTE_AT"); at && ticks == int(std::atof(at) / 0.05)) {
+				static clap_event_note note{{sizeof(clap_event_note), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_ON, 0}, -1, 0, 0, 60, 1.0};
+				static const clap_input_events in{nullptr, [](const clap_input_events *) -> uint32_t { return 1; },
+				                                  [](const clap_input_events *, uint32_t) -> const clap_event_header * { return &note.header; }};
+				static const clap_output_events out{nullptr, [](const clap_output_events *, const clap_event_header *) { return true; }};
+				auto *params = (const clap_plugin_params *)plugin->get_extension(plugin, CLAP_EXT_PARAMS);
+				if (params && params->flush) params->flush(plugin, &in, &out);
+			}
 			NSSize s = window.contentView.bounds.size;
 			if (s.width != lastSize.width || s.height != lastSize.height) ++sizeChanges;
 			lastSize = s;

@@ -77,6 +77,14 @@ function subscribeStores() {
     state.snap.transportPlaying = v.playing;
     render(false);
   });
+  api.subscribe("plugin.errors", (v) => renderErrors(v.errors || []));
+  api.subscribe("app", (v) => {
+    const was = state.app && state.app.online;
+    state.app = v;
+    if (v.online === false && was !== false) log("catalog unreachable:", v.error);
+    if (state.view === "browse") ensurePicker(); // came online: the picker; went offline: the installed list
+    else document.body.classList.toggle("offline", v.online === false);
+  });
   api.subscribe("ui", (v) => {
     state.snap.innerGui = v.innerGui;
     // the first value always applies: the page starts on "browse", and entering a view does its work (the picker)
@@ -93,7 +101,7 @@ function setView(view, tellHost = true) {
   document.body.dataset.view = view;
   for (const b of document.querySelectorAll(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.view === view));
   $("pluginPill").setAttribute("aria-pressed", String(view === "browse"));
-  if (view === "browse") ensurePicker();
+  if (view === "browse") { ensurePicker(); command("app.checkCatalog"); } // a fresh answer: it may have gone down
   $("settingsBtn").setAttribute("aria-pressed", String(view === "settings"));
   if (window.__settings) window.__settings.active(view === "settings"); // its stores and stream only while shown
   if (typeof scheduleVisibleParams === "function") scheduleVisibleParams(); // entering Params: rows + texts; leaving: none
@@ -103,16 +111,17 @@ function setView(view, tellHost = true) {
   }
 }
 
-function apiBase() { return (state.snap && state.snap.apiBase) || "http://127.0.0.1:7790"; }
+function apiBase() { return (state.app && state.app.apiBase) || (state.snap && state.snap.apiBase) || "http://127.0.0.1:7790"; }
 
+// The catalog's reachability is the core's (the app store, PLAN 5.1): the picker loads once it says online.
 function ensurePicker(force = false) {
-  log("ensurePicker", location.href);
+  const online = state.app && state.app.online;
+  document.body.classList.toggle("offline", online === false);
+  if (online === false) { renderInstalled(); return; }
+  if (online !== true) return; // not checked yet: the app store's first answer calls this again
   const type = state.snap && state.snap.instrument ? "instrument" : "audio-effect,analyzer,note-effect";
   const src = `${apiBase()}/select?type=${encodeURIComponent(type)}&native=1&embed=1&state=host&theme=dark`;
-  fetch(`${apiBase()}/v1/health`, { cache: "no-store" })
-    .then((r) => { if (!r.ok) throw new Error(r.status); document.body.classList.remove("offline"); })
-    .then(() => { if (force || state.pickerSrc !== src) { state.pickerSrc = src; $("picker").src = src; } })
-    .catch((err) => { log("catalog health check failed:", err); document.body.classList.add("offline"); renderInstalled(); });
+  if (force || state.pickerSrc !== src) { state.pickerSrc = src; $("picker").src = src; }
 }
 
 // Messages from the catalog's picker: only from our picker iframe, served by the catalog. Anything else in the page
@@ -150,7 +159,8 @@ function render(full) {
   document.body.classList.toggle("own-transport", !!plugin && s.hostTransport === false);
   $("transportToggle").setAttribute("aria-pressed", String(!!s.transportPlaying));
   document.body.classList.toggle("loading", loading);
-  document.body.classList.toggle("missing", !loading && (s.status === "missing" || s.status === "error") && !plugin);
+  const crashed = !!(plugin && s.moduleError); // the module trapped or timed out: it doesn't run any more
+  document.body.classList.toggle("missing", crashed || (!loading && (s.status === "missing" || s.status === "error") && !plugin));
 
   if (state.wasLoading && !loading && plugin) {
     // loaded: the wordmark's italic c flashes signal yellow, then fades back
@@ -182,7 +192,10 @@ function render(full) {
   $("progressBar").style.width = `${Math.round((s.progress || 0) * 100)}%`;
   document.querySelector(".progress").classList.toggle("indeterminate", s.status !== "downloading");
   renderPixels(loading, s.status === "downloading" ? s.progress || 0 : null);
-  if (s.missing) {
+  if (crashed) {
+    $("missingTitle").textContent = `${plugin.name || plugin.id} stopped`;
+    $("missingText").textContent = `${s.moduleError}. Retry loads it again, with its default settings.`;
+  } else if (s.missing) {
     $("missingTitle").textContent = `${s.missing.name || s.missing.id} is unavailable`;
     $("missingText").textContent = s.message || "";
   } else if (s.status === "error") {
@@ -553,19 +566,32 @@ $("openCatalog").onclick = () => {
   const p = state.snap && state.snap.plugin;
   if (p) command("app.openUrl", { url: `${apiBase()}/plugins/${encodeURIComponent(p.id)}` });
 };
-$("retryCatalog").onclick = () => ensurePicker(true);
-$("refreshCatalog").onclick = () => ensurePicker(true);
+$("retryCatalog").onclick = () => command("app.checkCatalog");
+$("refreshCatalog").onclick = () => { command("app.checkCatalog"); ensurePicker(true); };
 $("retryLoad").onclick = () => {
-  const m = state.snap && state.snap.missing;
+  const m = state.snap && (state.snap.missing || (state.snap.moduleError && state.snap.plugin)); // unavailable, or stopped
   if (m) command("plugin.load", { pluginId: m.id, sha256: m.sha256 || "" });
 };
+// recent errors (plugin.errors, PLAN 5.2): newest first, under the unavailable / stopped card
+function renderErrors(errors) {
+  const list = $("errorList");
+  list.textContent = "";
+  for (const e of errors) {
+    const li = document.createElement("li");
+    const head = document.createElement("b");
+    head.textContent = `${new Date(e.time).toLocaleTimeString()} ${e.source}`;
+    li.append(head, document.createTextNode(e.message));
+    list.appendChild(li);
+  }
+  $("errorDetails").hidden = errors.length === 0;
+}
 // Text entry only: the velocity slider is an <input type=range> and must not swallow note keys.
 const isTextEntry = (el) => el instanceof Element && el.matches("input:not([type=range]):not([type=checkbox]), select, textarea, [contenteditable]");
 document.addEventListener("keydown", (e) => {
   if (isTextEntry(e.target)) return;
   const keys = { 1: "plugin", 2: "macros", 3: "params", 4: "browse" };
   if ((e.metaKey || e.ctrlKey) && keys[e.key]) { e.preventDefault(); setView(keys[e.key]); return; }
-  if ((e.metaKey || e.ctrlKey) && e.key === "r" && state.view === "browse") { e.preventDefault(); ensurePicker(true); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key === "r" && state.view === "browse") { e.preventDefault(); command("app.checkCatalog"); ensurePicker(true); return; }
   if ((e.metaKey || e.ctrlKey) && e.key === "k" && document.body.classList.contains("accepts-notes")) { e.preventDefault(); userToggleKeyboard(); return; }
   if (!e.metaKey && !e.ctrlKey && !e.altKey) kbdKey(e, true);
 });
@@ -582,6 +608,7 @@ const kbd = {
   base: 48,          // lowest key shown: C3
   octaves: 3,
   down: new Map(),   // key -> source ("ptr" | letter)
+  daw: new Set(),    // keys the DAW holds (keyboard.notes events, while the keyboard is open)
   sent: new Set(),
   noteOn(key, source) {
     if (key < 0 || key > 127 || this.down.has(key)) return;
@@ -629,6 +656,7 @@ function buildKeys() {
       if (k % 12 === 0) el.innerHTML = `<span class="lbl">C${Math.floor(k / 12) - 1}</span>`;
     }
     if (kbd.down.has(k)) el.classList.add("on");
+    if (kbd.daw.has(k)) el.classList.add("daw");
     box.append(el);
   }
   $("octLabel").textContent = `C${Math.floor(kbd.base / 12) - 1}`;
@@ -685,8 +713,17 @@ function kbdCode(code, down) {
   kbd.noteOn(key, code);
   return true;
 }
+// the DAW's notes (PLAN 5.4): {key, on}; key -1 clears them all
+api.onEvent("keyboard.notes", (notes) => {
+  for (const n of notes) {
+    if (n.key < 0) { for (const k of kbd.daw) paintDaw(k, false); kbd.daw.clear(); continue; }
+    if (n.on) kbd.daw.add(n.key); else kbd.daw.delete(n.key);
+    paintDaw(n.key, n.on);
+  }
+});
+function paintDaw(key, on) { const el = $("keys").querySelector(`[data-key="${key}"]`); if (el) el.classList.toggle("daw", on); }
 // keys typed into the hosted plugin's GUI, copied here by the editor (Editor.mm, forwardNoteKey)
-window.plugincircuitHost = { key: (code, down) => kbdCode(code, down) };
+api.onEvent("keyboard.key", (k) => kbdCode(k.code, k.down));
 
 function shiftOctave(d) {
   const base = Math.min(127 - kbd.octaves * 12 - (127 - kbd.octaves * 12) % 12, Math.max(0, kbd.base + d * 12)); // top key <= 127
@@ -702,7 +739,7 @@ $("octUp").onclick = () => shiftOctave(1);
 function showKeyboard(open, tellHost = true) {
   if (open === kbd.open) return;
   kbd.open = open;
-  if (!open) kbd.allOff();
+  if (!open) { kbd.allOff(); kbd.daw.clear(); } // the core stops sending DAW notes while closed
   document.body.classList.toggle("kbd-open", open);
   $("kbdToggle").setAttribute("aria-pressed", String(open));
   if (open) buildKeys();

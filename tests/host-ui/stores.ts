@@ -5,6 +5,9 @@
 //   - a dragged value stays the page's until the core acknowledges the drag's end
 //   - the Advanced tab renders from the settings schema; a change is a settings set
 //   - the keyboard octave is the ui store's (instance scope): it follows the store and sets it
+//   - offline / online come from the app store; Try again asks the core to check
+//   - keyboard.key events play notes; keyboard.notes events light the DAW's keys
+//   - a stopped plugin (moduleError) shows the card with plugin.errors; Retry reloads it
 //   - the settings page subscribes to its stores and stream only while shown
 //
 // Run: bun tests/host-ui/stores.ts   (uses Playwright from ../website/node_modules)
@@ -137,6 +140,74 @@ const octave = await page.evaluate(async () => {
 })
 check(octave.fromStore === 60, "the keyboard's octave follows the ui store", octave)
 check(octave.after === 48 && octave.set?.keyboardBase === 48, "an octave shift sets the ui store", octave)
+
+// the catalog's reachability is the app store's (PLAN 5.1): no /v1/health from the page
+const catalog = await page.evaluate(async () => {
+  const w = window as any
+  const sleep = (t: number) => new Promise((r) => setTimeout(r, t))
+  w.setView("browse")
+  w.__patch("app", { online: false, apiBase: "http://127.0.0.1:9", error: "refused" })
+  await sleep(20)
+  const offline = document.body.classList.contains("offline")
+  const checks = () => w.__requests.filter((r: any) => r.name === "app.checkCatalog").length
+  const before = checks()
+  ;(document.querySelector("#retryCatalog") as HTMLElement).click()
+  const retried = checks() === before + 1
+  w.__patch("app", { online: true, apiBase: "http://127.0.0.1:9", error: "" })
+  await sleep(20)
+  const picker = (document.querySelector("#picker") as HTMLIFrameElement).getAttribute("src") || ""
+  w.setView("params")
+  return { offline, retried, back: !document.body.classList.contains("offline"), picker }
+})
+check(catalog.offline && catalog.retried, "offline from the app store; Try again asks the core", catalog)
+check(catalog.back && catalog.picker.startsWith("http://127.0.0.1:9/select"), "online again: the picker loads", catalog)
+
+// events (PLAN 5.3, 5.4): a note key typed into the plugin's GUI plays; the DAW's notes light the keyboard
+const keys = await page.evaluate(async () => {
+  const w = window as any
+  const sleep = (t: number) => new Promise((r) => setTimeout(r, t))
+  w.__patch("ui", { ...w.__stores.ui, keyboard: true, keyboardBase: 48 })
+  await sleep(20)
+  w.plugincircuitReceive({ kind: "event", topic: "keyboard.key", data: { code: "KeyA", down: true } })
+  w.plugincircuitReceive({ kind: "event", topic: "keyboard.key", data: { code: "KeyA", down: false } })
+  const notes = w.__requests.filter((r: any) => r.name === "keyboard.note").map((r: any) => `${r.args.key}:${r.args.on}`)
+  w.plugincircuitReceive({ kind: "event", topic: "keyboard.notes", data: [{ key: 50, on: true }, { key: 52, on: true }, { key: 52, on: false }] })
+  const lit = [...document.querySelectorAll("#keys .key.daw")].map((e: any) => +e.dataset.key)
+  w.plugincircuitReceive({ kind: "event", topic: "keyboard.notes", data: [{ key: -1, on: false }] })
+  const cleared = document.querySelectorAll("#keys .key.daw").length
+  return { notes, lit, cleared }
+})
+check(JSON.stringify(keys.notes) === JSON.stringify(["48:1", "48:0"]), "a keyboard.key event plays the note", keys.notes)
+check(JSON.stringify(keys.lit) === JSON.stringify([50]), "keyboard.notes events light the DAW's keys", keys.lit)
+check(keys.cleared === 0, "an all-off clears them", keys.cleared)
+
+// a plugin that stopped (its module trapped, PLAN 5.2): the card says so, lists the errors, and Retry reloads it
+const crash = await page.evaluate(async () => {
+  const w = window as any
+  const sleep = (t: number) => new Promise((r) => setTimeout(r, t))
+  w.setView("plugin")
+  w.__patch("plugin.errors", { errors: [{ time: Date.now(), source: "plugin", message: "WCLAP function call threw (trapped)" },
+    { time: Date.now() - 1000, source: "bridge", message: "wasm trap: unreachable" }] })
+  w.__patch("plugin", { ...w.__stores.plugin, moduleError: "WCLAP function call threw (trapped)" })
+  await sleep(20)
+  const shown = document.body.classList.contains("missing")
+  const title = document.querySelector("#missingTitle")!.textContent
+  const items = [...document.querySelectorAll("#errorList li")].map((li) => li.textContent)
+  const details = !(document.querySelector("#errorDetails") as HTMLElement).hidden
+  ;(document.querySelector('#missing [data-goto="browse"]') as HTMLElement).click() // Choose another
+  const overBrowse = getComputedStyle(document.querySelector("#missing")!).display !== "none"
+  w.setView("plugin")
+  ;(document.querySelector("#retryLoad") as HTMLElement).click()
+  const load = w.__requests.filter((r: any) => r.name === "plugin.load").pop()?.args
+  w.__patch("plugin", { ...w.__stores.plugin, moduleError: "" })
+  await sleep(20)
+  return { shown, title, items, details, overBrowse, load, gone: !document.body.classList.contains("missing") }
+})
+check(crash.shown && crash.title === "Test Synth stopped", "a stopped plugin shows the card", crash)
+check(crash.details && crash.items.length === 2 && crash.items[0]!.includes("plugin") && crash.items[0]!.includes("trapped"), "its errors are listed, newest first", crash.items)
+check(crash.load?.pluginId === "test.synth", "Retry loads it again", crash.load)
+check(!crash.overBrowse, "Choose another: the card doesn't cover Browse", crash)
+check(crash.gone, "the card goes once it runs again", crash)
 
 console.log(failures ? `${failures} failure(s)` : "PASS: the host UI follows its stores")
 await browser.close()

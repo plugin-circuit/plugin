@@ -242,7 +242,8 @@ body.offline #offline { display: block; }
 /* ---- overlays ---- */
 .overlay { position: absolute; inset: 0; display: none; place-items: center; z-index: 4; background: color-mix(in srgb, var(--c-bg) 96%, transparent); }
 body.loading #overlay { display: grid; }
-body.missing #missing { display: grid; }
+/* not over Browse or Settings: "Choose another" leads there */
+body.missing:not([data-view="browse"]):not([data-view="settings"]) #missing { display: grid; }
 .loader { display: flex; flex-direction: column; align-items: center; gap: 12px; min-width: 300px; text-align: center; }
 .loader.card { align-items: flex-start; text-align: left; margin: 0; }
 .loader-title { font: 500 30px/1.1 var(--f-display); letter-spacing: var(--tr-display); }
@@ -297,6 +298,16 @@ body.kbd-open .kbd { display: grid; }
 .key.black { height: 60%; background: #0a0a0a; border-radius: 0 0 5px 5px; z-index: 2; box-shadow: 0 0 0 2px var(--c-bg); }
 .key.white:hover { background: #ffffff; }
 .key.black:hover { background: #1f1f1f; }
+/* a note the DAW plays (keyboard.notes): lit, but lighter than one played here */
+.key.white.daw { background: color-mix(in srgb, var(--c-accent-ink) 55%, #fafafa); }
+.key.black.daw { background: color-mix(in srgb, var(--c-accent-ink) 55%, #0a0a0a); }
 .key.white.on, .key.black.on { background: var(--c-accent-ink); }
 .key .lbl { position: absolute; bottom: 7px; left: 0; right: 0; text-align: center; font: 500 9px/1 var(--f-mono); color: #737373; pointer-events: none; }
 @media (min-width: 900px) { .knobs { grid-template-columns: repeat(8, minmax(0, 1fr)); } }
+
+/* recent errors (plugin.errors), under an unavailable or stopped plugin */
+.errors { width: min(560px, 90vw); margin: -6px 0 18px; text-align: left; color: var(--c-text-muted); }
+.errors summary { cursor: pointer; font: 500 12px var(--f-body); text-align: center; }
+.errors ol { list-style: none; margin: 10px 0 0; padding: 0; max-height: 180px; overflow: auto; display: grid; gap: 8px; }
+.errors li { font: 400 11px/1.45 var(--f-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.errors li b { font-weight: 500; color: var(--c-text); margin-right: 6px; }

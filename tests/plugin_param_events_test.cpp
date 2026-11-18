@@ -279,6 +279,15 @@ int main(int argc, char **argv) {
 	std::printf("unmapped, key 60: the DAW got %zu events, the table holds %.2f dB\n", seen.size(), unmapped);
 	CHECK(seen.empty(), "a gesture on a parameter no macro maps must not reach the DAW");
 	CHECK(std::fabs(unmapped - -6.0) < 1e-9, "the table should hold -6 dB, got %.6f", unmapped);
+
+	// the plugin traps (key 62, PLAN 5.2): the DAW goes on. Blocks keep coming, the main thread's housekeeping
+	// reads the error, the state still saves (our part of it), the instance closes.
+	block(62);
+	for (int i = 0; i < 8; ++i) block(-1);
+	p->on_main_thread(p);
+	const auto afterTrap = saveState(p, state);
+	std::printf("after a trap: the state saves %zu bytes\n", afterTrap.size());
+	CHECK(!afterTrap.empty(), "the state should still save after the plugin trapped%s", "");
 	close(p);
 	entry->deinit();
 	std::printf(failures ? "%d failure(s)\n" : "PASS: the table and the DAW follow the plugin's reported changes\n", failures);

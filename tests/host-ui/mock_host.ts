@@ -5,6 +5,8 @@ export type MockConfig = { apiBase: string; stores?: Record<string, unknown> }
 
 export function defaultStores(apiBase: string) {
   return {
+    app: { online: true, apiBase, error: "" },
+    "plugin.errors": { errors: [] },
     plugin: { status: "empty", message: "", progress: 0, instrument: true, apiBase, plugin: null, missing: null, installed: [] },
     macros: {
       macros: Array.from({ length: 64 }, () => ({ name: "", custom: false, targets: [] })),

@@ -56,6 +56,8 @@ public:
 	void deltaStore(const std::string &name, DeltaStore s);
 	void command(const std::string &name, Command c);
 	void stream(const std::string &name, std::function<Value()> sample, double hz);
+	// An event, pushed as it happens (no subscription: the page listens or doesn't): {kind: "event", topic, data}.
+	void emit(const std::string &topic, Value data);
 
 	// The page's one call. `name`: "hello", "store.get" / "store.set" / "store.unsubscribe" ({store, value}),
 	// "stream.subscribe" / "stream.unsubscribe" ({stream}), or a command. Returns {ok, result} or {ok: false, error}.

@@ -159,6 +159,7 @@ bool PluginCircuitPlugin::init() {
 
 	uiEvents_.reset(1024);
 	uiNotes_.reset(1024);
+	dawNotes_.reset(256);
 	innerIn_.storage.reserve(1 << 16);
 	innerIn_.offsets.reserve(4096);
 	return true;
@@ -304,9 +305,38 @@ void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slo
 		} else if (h->type == CLAP_EVENT_PARAM_MOD || h->type == CLAP_EVENT_PARAM_GESTURE_BEGIN || h->type == CLAP_EVENT_PARAM_GESTURE_END) {
 			continue; // macros aren't modulatable yet; gestures go from a plugin to its host, never back
 		} else {
+			if (showDawNotes_.load(std::memory_order_relaxed)) noteForKeyboard(h);
 			innerIn_.push(h); // notes, note expressions, MIDI, transport
 		}
 	}
+}
+
+// [audio-thread] (or a flush): a DAW note for the on-screen keyboard. Lock-free; a full queue drops the note and
+// later clears the keyboard (all off) rather than leaving a key lit.
+void PluginCircuitPlugin::noteForKeyboard(const clap_event_header *h) {
+	int key = -2;
+	bool on = false;
+	if (h->type == CLAP_EVENT_NOTE_ON || h->type == CLAP_EVENT_NOTE_OFF || h->type == CLAP_EVENT_NOTE_CHOKE) {
+		auto *n = reinterpret_cast<const clap_event_note *>(h);
+		key = n->key < 0 ? -1 : n->key;
+		on = h->type == CLAP_EVENT_NOTE_ON && n->velocity > 0;
+	} else if (h->type == CLAP_EVENT_MIDI) {
+		auto *m = reinterpret_cast<const clap_event_midi *>(h);
+		const uint8_t status = m->data[0] & 0xF0;
+		if (status == 0x90 || status == 0x80) {
+			key = m->data[1] & 0x7F;
+			on = status == 0x90 && m->data[2] > 0;
+		} else if (status == 0xB0 && (m->data[1] == 123 || m->data[1] == 120)) {
+			key = -1; // all notes / all sound off
+		}
+	}
+	if (key < -1 || key > 127) return; // not a note event (or out of range)
+	if (!dawNotes_.push({int16_t(key), on})) dawNotesOverflow_.store(true, std::memory_order_relaxed);
+}
+
+void PluginCircuitPlugin::showDawNotes(bool on) {
+	showDawNotes_.store(on, std::memory_order_relaxed);
+	if (!on) takeDawNotes([](const DawNote &) {}); // stale notes don't light the keyboard when it opens again
 }
 
 bool PluginCircuitPlugin::innerOutTryPush(const clap_output_events *list, const clap_event_header *h) {
@@ -646,6 +676,36 @@ void PluginCircuitPlugin::setStatus(Status s, std::string message) {
 	}
 	status_.store((int)s);
 	stateVersion_++;
+	if (s == Status::Error || s == Status::Missing) {
+		std::lock_guard<std::mutex> lock(statusMutex_);
+		reportError("load", statusMessage_.empty() ? std::string(s == Status::Missing ? "missing" : "error") : statusMessage_);
+	}
+}
+
+void PluginCircuitPlugin::reportError(const std::string &source, const std::string &message) {
+	const double now = std::chrono::duration<double, std::milli>(std::chrono::system_clock::now().time_since_epoch()).count();
+	std::lock_guard<std::mutex> lock(errorsMutex_);
+	if (errors_.size() >= 30) errors_.pop_front();
+	errors_.push_back({now, source, message});
+	++errorsVersion_;
+}
+
+choc::value::Value PluginCircuitPlugin::errorsValue() {
+	auto list = choc::value::createEmptyArray();
+	std::lock_guard<std::mutex> lock(errorsMutex_);
+	for (auto it = errors_.rbegin(); it != errors_.rend(); ++it) // newest first
+		list.addArrayElement(choc::value::createObject("E", "time", it->time, "source", it->source, "message", it->message));
+	return list;
+}
+
+void PluginCircuitPlugin::clearErrors() {
+	std::lock_guard<std::mutex> lock(errorsMutex_);
+	errors_.clear();
+	++errorsVersion_;
+}
+
+std::string PluginCircuitPlugin::moduleError() const {
+	return current_ && current_->inner->module() ? current_->inner->module()->error() : std::string();
 }
 
 void PluginCircuitPlugin::startLoad(LoadJob job) {
@@ -856,6 +916,19 @@ std::string PluginCircuitPlugin::changeInstance(const choc::value::ValueView &ch
 
 void PluginCircuitPlugin::housekeeping() {
 	Settings::poll(); // another process changed settings.json
+	// errors: the bridge's diagnostics since the last look, and the module's own (sticky: reported once)
+	for (const auto end = bridgelog::end(); bridgeCursor_ < end; ++bridgeCursor_) {
+		if (end - bridgeCursor_ > 64) bridgeCursor_ = end - 64; // the ring's size: older ones are gone
+		std::string message;
+		if (bridgelog::read(bridgeCursor_, message)) reportError("bridge", message);
+	}
+	if (auto e = moduleError(); !e.empty() && e != lastModuleError_) {
+		lastModuleError_ = e;
+		reportError("plugin", e);
+		stateVersion_++; // the plugin store shows it
+	} else if (e.empty()) {
+		lastModuleError_.clear();
+	}
 	std::unique_ptr<LoadJob> job;
 	{
 		std::lock_guard<std::mutex> lock(jobMutex_);

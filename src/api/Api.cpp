@@ -100,6 +100,13 @@ Api::Value Api::request(const std::string &name, const View &args) {
 	return fail("unknown request '" + name + "'");
 }
 
+void Api::emit(const std::string &topic, Value data) {
+	if (!send) return;
+	auto m = choc::value::createObject("Message", "kind", "event", "topic", topic);
+	m.addMember("data", std::move(data));
+	send(m);
+}
+
 void Api::tick(double now) {
 	for (auto &[name, s] : stores_) {
 		if (!s.subscribed) continue;

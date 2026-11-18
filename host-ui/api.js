@@ -1,6 +1,6 @@
 // The page's side of the one API (docs/MESSAGING.md, "One API"; the core's side is src/api/Api.h).
 //   to the core:   plugincircuitRequest(name, args) -> Promise<{ok, result} | {ok: false, error}>
-//   from the core: plugincircuitReceive({kind: "patch" | "stream", topic, version, full, data})
+//   from the core: plugincircuitReceive({kind: "patch" | "stream" | "event", topic, version, full, data})
 //
 //   api.hello()                       the handshake; rejects on a protocol mismatch
 //   api.subscribe(store, fn)          fn(data, {full, version}) with the whole value first, then each patch
@@ -8,6 +8,7 @@
 //   api.set(store, value)             validated by the store's owner; the change arrives as a patch
 //   api.command(name, args)           the result, or throws the error
 //   api.onStream(stream, fn)          fn(sample) while subscribed
+//   api.onEvent(topic, fn)            fn(data) for each event the core pushes (no subscription)
 // Every subscribe / onStream returns its unsubscribe.
 "use strict";
 
@@ -15,6 +16,7 @@ window.api = (() => {
   const PROTOCOL = 1;
   const stores = new Map(); // name -> {version, listeners, pending: patches before the get's reply, sets: in flight}
   const streams = new Map(); // name -> listeners
+  const events = new Map(); // topic -> listeners
 
   function raw(name, args) {
     if (typeof window.plugincircuitRequest !== "function") return Promise.resolve({ ok: false, error: "no host" });
@@ -93,6 +95,11 @@ window.api = (() => {
         if (l.size === 0) { streams.delete(name); raw("stream.unsubscribe", { stream: name }); }
       };
     },
+    onEvent(topic, fn) {
+      if (!events.has(topic)) events.set(topic, new Set());
+      events.get(topic).add(fn);
+      return () => events.get(topic).delete(fn);
+    },
     // the core calls this (through window.plugincircuitReceive)
     receive(m) {
       if (!m) return;
@@ -101,6 +108,8 @@ window.api = (() => {
         if (s) deliver(m.topic, s, m);
       } else if (m.kind === "stream") {
         for (const fn of streams.get(m.topic) || []) fn(m.data);
+      } else if (m.kind === "event") {
+        for (const fn of events.get(m.topic) || []) fn(m.data);
       }
     },
   };

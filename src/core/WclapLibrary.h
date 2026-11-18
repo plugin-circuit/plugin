@@ -20,6 +20,7 @@ public:
 	const clap_plugin_factory *factory() const { return factory_; }
 	const std::string &dir() const { return dir_; }
 	std::vector<PluginDescriptorInfo> descriptors() const;
+	std::string error() const; // the module's first error (a trap, a timeout), "" while there is none; sticky
 
 private:
 	friend class WclapLibrary;

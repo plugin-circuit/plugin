@@ -1,4 +1,5 @@
 // The plugin factory: Plugin Circuit FX and Plugin Circuit Synth, plus clap-wrapper's VST3/AUv2 hints.
+#include "core/CatalogHealth.h"
 #include "plugin/PluginCircuitPlugin.h"
 
 #include <clapwrapper/auv2.h>
@@ -46,7 +47,7 @@ const clap_plugin_factory_as_vst3 vst3Factory = {
 } // namespace
 
 bool plugincircuit_entry_init(const char *) { return true; }
-void plugincircuit_entry_deinit() {}
+void plugincircuit_entry_deinit() { plugincircuit::CatalogHealth::shutdown(); }
 const void *plugincircuit_entry_get_factory(const char *id) {
 	if (!std::strcmp(id, CLAP_PLUGIN_FACTORY_ID)) return &pluginFactory;
 	if (!std::strcmp(id, CLAP_PLUGIN_FACTORY_INFO_AUV2)) return &auv2Factory;

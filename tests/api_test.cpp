@@ -139,6 +139,12 @@ int main() {
 	api.tick(10);
 	CHECK(sent.empty());
 
+	// an event goes out at once, no subscription
+	sent.clear();
+	api.emit("keyboard.key", choc::value::createObject("K", "code", "KeyA", "down", true));
+	CHECK(sent.size() == 1 && std::string(sent[0]["kind"].getString()) == "event" &&
+	      std::string(sent[0]["topic"].getString()) == "keyboard.key" && std::string(sent[0]["data"]["code"].getString()) == "KeyA");
+
 	std::printf(failures ? "%d failure(s)\n" : "api: all checks passed\n", failures);
 	return failures ? 1 : 0;
 }

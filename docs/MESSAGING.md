@@ -1,6 +1,7 @@
 # Messaging: who owns what, and how changes travel
 
-Status: design. "Today" notes describe the current code where it differs.
+Status: built (docs/PLAN.md, phases 0 to 5). "Built" notes say where the code differs from the design; open
+points are in PLAN.md.
 
 ## Actors
 
@@ -8,7 +9,7 @@ Status: design. "Today" notes describe the current code where it differs.
 | --- | --- | --- |
 | **DAW** | audio (`process`), main | core, through CLAP: parameter events, gestures, state, `rescan`, `mark_dirty` |
 | **Core** (Plugin Circuit, C++) | audio and main | everyone |
-| **Host UI** (our page, CHOC webview) | main (JS) | core, through the `plugincircuitCall` binding and pushed messages |
+| **Host UI** (our page, CHOC webview) | main (JS) | core, through the `plugincircuitRequest` binding and pushed messages |
 | **WCLAP DSP** (the hosted plugin, WebAssembly) | audio, main | core, through CLAP (it sees core as its host) |
 | **WCLAP GUI** (its own page, separate webview) | main (JS) | only its own DSP, through webview messages. We relay the bytes and never read them |
 
@@ -143,9 +144,9 @@ gets focus). Values the audio thread needs (the wait ratio) are pushed to it as 
 - Names are namespaced (`plugin.*`, `params.*`, `macros.*`, `settings.*`, `cache.*`, `perf.*`, `transport.*`,
   `keyboard.*`, `ui.*`, `app.*`), and the list of names lives in one file per side, so a grep shows the whole API.
 
-### Today's calls, mapped
+### The old calls, mapped (for reading older code and commits)
 
-| Today | Becomes |
+| Before | Now |
 | --- | --- |
 | `ready` | `hello` |
 | `load`, `unload` | commands `plugin.load`, `plugin.unload` (store `plugin` for status) |
@@ -166,26 +167,24 @@ gets focus). Values the audio thread needs (the wait ratio) are pushed to it as 
 
 Found in an audit of the code; each needs a place in the API above.
 
-| Channel | Today | Decision |
+| Channel | Before | Decision |
 | --- | --- | --- |
 | **Picker iframe → host UI** (`plugincircuit:select` / `cancel` via `postMessage`) | `host-ui/app.js` accepts it from any sender: no `e.source` / `e.origin` check, so any frame in the page could make the plugin load something | Accept only from the picker iframe (`e.source === picker.contentWindow`) and the catalog's origin. The message format is a contract with the website: versioned, documented in the website's `docs/API.md` |
 | **Host UI → catalog server** (`/v1/health`, the picker URL, links) | the page decides "offline" itself; the core decides it separately | An `app` store owned by the core (online state, API base); the page stops fetching `/v1/health`. Built (phase 5) |
 | **Native → page events** beyond the snapshot: note keys forwarded from a focused plugin GUI (`plugincircuitHost.key`) | a second function on `window` | An `event` message on the one wire (`keyboard.key`). Built (phase 5) |
 | **Errors** (load failures, WebAssembly traps, the bridge's log) | the DAW's log and stderr; the UI only sees status "Error" and a message | A `plugin.errors` store (recent errors, with time and source). Built (phase 5): `plugin.errors`, `moduleError` in `plugin`; the bridge's own log waits for an upstream log API |
 | **Notes from the DAW** shown on the on-screen keyboard | not shown | Optional stream `keyboard.notes`: the audio thread pushes note on/off into a preallocated queue, the main thread samples it. Built (phase 5) as `keyboard.notes` events |
-| **Between DAW processes**: `settings.json`, package locks, `usage.json` | locks and usage work; another process sees a settings change only after a restart | Machine-scope settings: watch `settings.json` (or re-read on window focus) |
-| **The WCLAP's tail** | the inner host's `clap.tail` `changed()` is a no-op, the plugin's tail is never asked for, we offer the DAW no `clap.tail`, and `processBlock` always returns `CONTINUE` (the plugin's sleep / tail status is dropped) | Offer `clap.tail` (the inner plugin's value), forward `changed()` to the DAW, pass the inner process status through (with `request_process` when the UI queues events, so a sleeping plugin wakes for on-screen notes) |
-| **The WCLAP's note ports** | the inner host's `note_ports.rescan()` is a no-op | Treat it as a restart (`request_restart`): our note-dialect conversion is chosen in `activate()` |
+| **Between DAW processes**: `settings.json`, package locks, `usage.json` | locks and usage work; another process sees a settings change only after a restart | Machine-scope settings: watch `settings.json` (or re-read on window focus). Built (phase 4): its mtime polled every 0.5 s |
+| **The WCLAP's tail** | the inner host's `clap.tail` `changed()` is a no-op, the plugin's tail is never asked for, we offer the DAW no `clap.tail`, and `processBlock` always returns `CONTINUE` (the plugin's sleep / tail status is dropped) | Offer `clap.tail` (the inner plugin's value), forward `changed()` to the DAW, pass the inner process status through (with `request_process` when the UI queues events, so a sleeping plugin wakes for on-screen notes). Built (phase 0) |
+| **The WCLAP's note ports** | the inner host's `note_ports.rescan()` is a no-op | Treat it as a restart (`request_restart`): our note-dialect conversion is chosen in `activate()`. Built (phase 0) |
 | Latency, `mark_dirty`, timers, `on_main_thread`, editor resizing | handled | unchanged |
 
 ## Messages
 
 ### Host UI to core: requests
 
-Every call is `call(method, args)` and returns a promise with `{ok, error?, ...}`. Commands (load, unload, view,
-mapMacro, renameMacro, autoMap, cache...) are applied on the main thread and answered.
-
-Today: calls return `true` whatever happened, so the UI can't show a failure.
+Every request is `plugincircuitRequest(name, args)` and returns a promise of `{ok, result}` or `{ok: false, error}`
+(`host-ui/api.js`, `src/api/Api.h`). Commands are applied on the main thread and answered; a refused one says why.
 
 ### Host UI to core: parameter edits, with gestures
 
@@ -205,8 +204,6 @@ block the audio thread applies it to the WCLAP (`CLAP_EVENT_PARAM_VALUE` on the 
 the DAW: `PARAM_GESTURE_BEGIN`, the values, then `PARAM_GESTURE_END`, so the DAW records one automation pass. When the
 DAW isn't processing, the core asks for `params.flush`, which does the same on the main thread.
 
-Today: only macros send gestures; parameter sliders send bare values (no gestures for the DAW).
-
 ### Core to host UI: pushed updates, not polling
 
 | Message | When | Contents |
@@ -214,19 +211,20 @@ Today: only macros send gestures; parameter sliders send bare values (no gesture
 | `state` | the structure changed: plugin loaded, parameter list rescanned, mapping edited, status | the full snapshot, with a `version` |
 | `values` | some values changed | only the changed parameters and macros: `{id, value, text}`. Text comes from the WCLAP's `value_to_text`, called only for these. At most 30 per second, coalesced |
 | `status` | loading progress | status, message, progress |
-| `ack` | a gesture ended | the committed value and text for that parameter: the owner's copy now matches the truth (built as `ended: [{target, id}]` in the `params` store's patches) |
+| `ack` | a gesture ended | the committed value and text for that parameter: the owner's copy now matches the truth |
+
+Built as store patches (phase 3): `state` and `status` are the `plugin` and `macros` stores (whole values when their
+stamp changes); `values` is the `params` delta store (texts only for the parameters in view, phase 1b); `ack` is
+`ended: [{target, id}]` in the `params` patches (phase 2.4). Patches go out on the editor's 50 ms tick.
 
 How changes are noticed: the audio thread writes values into atomics and sets a bit in a preallocated "changed"
 bitset (one bit per parameter, no allocation, no lock). A main-thread timer swaps the bitset, reads those values,
 formats their text and sends one `values` message. Values of a parameter the UI owns (in a gesture) are not sent to
 it; the `ack` at the end closes the loop.
 
-Every message carries a `version`. The UI applies only newer versions, which replaces today's 400 ms "recently
-changed" guard.
-
-Today: every 50 ms a snapshot with the value and text of every parameter, including one `value_to_text` call into
-WebAssembly per parameter (about 2,600 per tick for Six Sines, even when nothing moves). The UI drops values for
-controls it's dragging.
+Every message carries a `version`. The UI applies only newer versions; this replaced a 400 ms "recently changed"
+guard, and a 50 ms snapshot of every parameter's value and text (about 2,600 `value_to_text` calls into the
+WebAssembly per tick for Six Sines, even when nothing moved; now 0 while idle).
 
 ### WCLAP to core
 
@@ -247,17 +245,17 @@ controls it's dragging.
    changes of other parameters (e.g. another macro the DAW automates).
 4. Meanwhile the DAW plays automation on macro 3: dropped for macro 3 while the gesture is open.
 5. Pointer up: `edit {macro, 3, 0.57, end}`. DAW gets `VALUE 3 = 0.57` and `GESTURE_END 3`.
-6. The core sends `ack {macro 3, 0.57, "57 %"}`; the UI's ownership ends, and later changes to macro 3 from anyone are
-   shown again.
+6. Once the end is applied, the core's next `params` patch carries `ended: [{target: "macro", id: 3}]`; the UI's
+   ownership ends, and later changes to macro 3 from anyone are shown again.
 
 ## Threading rules (unchanged)
 
 - Audio thread: no allocation, locks, logging or syscalls. Queues and the changed bitset are preallocated in `activate()`.
 - Main thread only: anything that calls into the WebAssembly plugin outside `process` (`value_to_text`, state,
   `params.flush`), file IO, the webviews.
-- The webviews are only touched on the main thread; a WCLAP's `request_resize` from another thread is handed over (as today).
+- The webviews are only touched on the main thread; a WCLAP's `request_resize` from another thread is handed over.
 
-## Changes from today, in order of value
+## The changes, in order of value (all built)
 
 1. Push changed values only, with text only for them (the 50 ms poll of every parameter goes).
 2. One edit protocol with gestures for macros and parameters, so DAW automation is recorded as gestures.

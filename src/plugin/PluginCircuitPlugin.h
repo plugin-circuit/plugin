@@ -308,7 +308,7 @@ public:
 
 private:
 
-	// installed packages for the snapshot: a disk scan, so cached (main thread)
+	// installed packages for the plugin store: a disk scan, so cached (main thread)
 	std::vector<CatalogPlugin> installedCache_;
 	std::chrono::steady_clock::time_point installedAt_{};
 	const std::vector<CatalogPlugin> &installedPlugins();
@@ -336,7 +336,7 @@ private:
 	std::atomic<double> downloadProgress_{0};
 	std::mutex statusMutex_;
 	std::string statusMessage_;
-	std::atomic<uint64_t> stateVersion_{1}; // bumps when the UI needs a full snapshot
+	std::atomic<uint64_t> stateVersion_{1}; // bumps when the plugin store (and others stamped with it) may have changed
 
 	std::unique_ptr<Editor> editor_;
 	friend class Editor;

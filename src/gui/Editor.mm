@@ -383,7 +383,7 @@ struct Editor::Impl {
 			static int n = 0;
 			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 			worst = std::max(worst, ms), sum += ms, ++n;
-			if (n % 10 == 0) std::fprintf(stderr, "[plugincircuit snapshot] last %.1f ms, avg %.1f ms, worst %.1f ms (patches)\n", ms, sum / n, worst);
+			if (n % 10 == 0) std::fprintf(stderr, "[plugincircuit patches] last %.2f ms, avg %.2f ms, worst %.1f ms\n", ms, sum / n, worst);
 		}
 	}
 

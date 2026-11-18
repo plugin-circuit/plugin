@@ -271,6 +271,29 @@ into a preallocated SPSC queue; the stream drains it while the keyboard is open.
 
 ## Phase 6: verify and clean up — S
 
+Status: done. Measured after phase 5 (RelWithDebInfo build, editor harness, `PLUGINCIRCUIT_DEBUG_CALLS`):
+
+| | Six Sines (2,591 params) | Helm (139) | Surge XT (775) |
+| --- | --- | --- | --- |
+| calls/s into the WebAssembly, plugin view idle (before phase 1: ~7,800 for Six Sines) | 0 | 0 | 0 |
+| calls/s, Params view idle | 64 `get_value` | 64 | 64 |
+| main-thread time per patch tick, steady | < 0.05 ms | < 0.05 ms | < 0.05 ms |
+| worst single patch tick (the full params get after a load) | 26 ms | 3 ms | 9 ms |
+
+Skipped blocks, wait ratio Off, 3 s, `main_thread_block_test` (audio in real time on its own thread, 2.67 ms blocks):
+`busy` is the UI's traffic before phase 1 (every parameter's text, nonstop); `table` is the traffic since, at the
+rates measured above (64 `get_value` a second, 40 texts once a second for a scroll). The harness has no audio, so
+this replays the measured rates rather than the editor itself.
+
+| | Six Sines | Helm | Surge XT |
+| --- | --- | --- | --- |
+| skipped blocks, `busy` | 1,157 of 1,386 | 892 of 1,353 | 818 of 1,354 |
+| skipped blocks, `table` | 4-5 | 0 | 0 |
+
+Not measured: the Performance tab's DSP load in a DAW (needs a DAW session). Cleanup: the snapshot builder, the old
+calls and the UI's timing guards were removed in phases 1-3 (`paramText` stays: it is the one call behind the text
+cache); stale "snapshot" comments and the debug label renamed; `MESSAGING.md` describes the code as built.
+
 - Measure against the baseline taken at the start of phase 1: calls into the WebAssembly per second (idle and with
   Params open), main-thread time per second in the editor, skipped blocks under real UI use (Six Sines, Surge XT,
   Helm), the Performance tab's DSP load.

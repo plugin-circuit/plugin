@@ -747,7 +747,7 @@ void PluginCircuitPlugin::startLoad(LoadJob job) {
 			if (result->state && !result->state->packageSha256.empty()) meta.sha256 = result->state->packageSha256;
 			setStatus(Status::Downloading, meta.name);
 			auto dir = Catalog::ensurePackage(meta.sha256, [this](uint64_t got, uint64_t total) {
-				downloadProgress_ = total ? double(got) / double(total) : 0.0; // partial snapshots carry it
+				downloadProgress_ = total ? double(got) / double(total) : 0.0; // the plugin store shows it
 				return true;
 			}, error);
 			if (dir.empty()) {

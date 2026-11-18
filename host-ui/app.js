@@ -253,7 +253,7 @@ function macroText(i) {
   if (!m.targets.length) return "—";
   if (m.targets.length > 1) return `${Math.round(state.values[i] * 100)} %  ·  ${m.targets.length} targets`;
   const pv = state.paramValues.get(m.targets[0].id);
-  return pv ? pv.text : ""; // the target's text arrives with the next snapshot
+  return pv ? pv.text : ""; // the target's text arrives with the next params patch
 }
 
 function renderKnobs() {

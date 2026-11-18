@@ -133,8 +133,19 @@ make_clapfirst_plugins(
 	PLUGIN_FORMATS CLAP VST3 AUV2
 	COPY_AFTER_BUILD FALSE
 	ASSET_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins
+	# two apps: the instrument and the effect (tools/app-icon.ts builds the icon from the website's app icon)
+	STANDALONE_MACOS_ICON ${CMAKE_CURRENT_SOURCE_DIR}/resources/PluginCircuit.icns
 	STANDALONE_CONFIGURATIONS
-		standalone "PluginCircuit" "studio.plugincircuit.host.synth")
+		standalone "PluginCircuit" "studio.plugincircuit.host.synth"
+		standalone_fx "PluginCircuit FX" "studio.plugincircuit.host.fx")
+# clap-wrapper copies the icon to Resources/Icon.icns but its Info.plist template leaves CFBundleIconFile empty
+if (APPLE)
+	foreach(sa PluginCircuit_standalone PluginCircuit_standalone_fx)
+		add_custom_command(TARGET ${sa} POST_BUILD
+			COMMAND /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile Icon" "$<TARGET_FILE_DIR:${sa}>/../Info.plist"
+			VERBATIM)
+	endforeach()
+endif()
 
 endif()
 

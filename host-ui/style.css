@@ -1,5 +1,17 @@
 /* Plugin Circuit host plugin UI: the dark variant of the catalog's minimal system (tokens.css, data-theme="dark").
    Monochrome surfaces, borderless rounded cards, mono labels; brand violet (--c-accent-ink) only marks values. */
+:root[data-theme="dark"] {
+  /* neutral greys, like the header's ink (#161616), instead of the catalog's violet-tinted ones */
+  --c-bg: #101010;
+  --c-bg-sunken: #0b0b0b;
+  --c-surface: #191919;
+  --c-raised: #242424;
+  --c-line: #262626;
+  --c-line-strong: #3a3a3a;
+  --c-text: #f5f5f5;
+  --c-text-muted: #a5a5a5;
+  --c-text-faint: #6c6c6c;
+}
 * { box-sizing: border-box; }
 html, body {
   margin: 0;

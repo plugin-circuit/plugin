@@ -120,7 +120,8 @@ function ensurePicker(force = false) {
   if (online === false) { renderInstalled(); return; }
   if (online !== true) return; // not checked yet: the app store's first answer calls this again
   const type = state.snap && state.snap.instrument ? "instrument" : "audio-effect,analyzer,note-effect";
-  const src = `${apiBase()}/select?type=${encodeURIComponent(type)}&native=1&embed=1&state=host&theme=dark`;
+  // header=0: our header already shows the wordmark and the slot ("Choose an instrument")
+  const src = `${apiBase()}/select?type=${encodeURIComponent(type)}&native=1&embed=1&header=0&state=host&theme=dark`;
   if (force || state.pickerSrc !== src) { state.pickerSrc = src; $("picker").src = src; }
 }
 

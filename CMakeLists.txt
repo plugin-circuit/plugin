@@ -72,6 +72,7 @@ if (APPLE)
 	target_link_libraries(tanh-net PRIVATE "-framework Foundation" "-lobjc")
 elseif (WIN32)
 	target_sources(tanh-net PRIVATE ${TANH_NET_DIR}/src/HttpClient_windows.cpp)
+	target_compile_definitions(tanh-net PRIVATE THL_PLATFORM_WINDOWS) # what tanh-lab's build defines; the backend is gated on it
 	target_link_libraries(tanh-net PRIVATE winhttp)
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
 	find_package(CURL REQUIRED)

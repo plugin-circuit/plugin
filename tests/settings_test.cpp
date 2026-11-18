@@ -15,6 +15,15 @@
 
 using namespace plugincircuit;
 
+// setenv isn't on Windows
+static void setEnv(const char *name, const char *value) {
+#if defined(_WIN32)
+	_putenv_s(name, value);
+#else
+	setenv(name, value, 1);
+#endif
+}
+
 static int failures = 0;
 #define CHECK(cond)                                                                                                    \
 	do {                                                                                                               \
@@ -101,7 +110,7 @@ int main() {
 		auto home = fs::temp_directory_path() / ("plugincircuit-settings-test-" + std::to_string(std::random_device{}()));
 		fs::remove_all(home);
 		fs::create_directories(home);
-		setenv("PLUGINCIRCUIT_HOME", home.c_str(), 1);
+		setEnv("PLUGINCIRCUIT_HOME", home.c_str());
 		const auto file = home / "settings.json";
 		writeFile(file, R"({"audioWaitRatio": 0.4, "fromTheFuture": "keep me"})");
 

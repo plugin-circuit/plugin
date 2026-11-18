@@ -31,6 +31,15 @@ static bool invalid(socket_t s) { return s < 0; }
 
 using namespace plugincircuit;
 
+// setenv isn't on Windows
+static void setEnv(const char *name, const char *value) {
+#if defined(_WIN32)
+	_putenv_s(name, value);
+#else
+	setenv(name, value, 1);
+#endif
+}
+
 static int failures = 0;
 #define CHECK(cond)                                                                                                    \
 	do {                                                                                                               \
@@ -104,7 +113,7 @@ int main() {
 	CatalogHealth::setIntervals(0.3, 0.1, 0.4);
 
 	// nothing listens on the API base yet (a port we closed): offline
-	setenv("PLUGINCIRCUIT_API", "http://127.0.0.1:9", 1);
+	setEnv("PLUGINCIRCUIT_API", "http://127.0.0.1:9");
 	CHECK(CatalogHealth::status().online == -1);
 	CHECK(server.requests == 0);
 	CatalogHealth::want(true); // an editor opened
@@ -112,7 +121,7 @@ int main() {
 	CHECK(!CatalogHealth::status().error.empty());
 
 	// the catalog comes up: online after the next check
-	setenv("PLUGINCIRCUIT_API", ("http://127.0.0.1:" + std::to_string(server.port)).c_str(), 1);
+	setEnv("PLUGINCIRCUIT_API", ("http://127.0.0.1:" + std::to_string(server.port)).c_str());
 	const auto v = CatalogHealth::version();
 	CatalogHealth::checkNow();
 	CHECK(waitFor([] { return CatalogHealth::status().online == 1; }, 5));

@@ -42,8 +42,15 @@ extern "C" {
 
 void plugincircuit_configure(const char *apiBase, const char *cacheDir) {
 	// Paths reads the environment, so configuration goes through it (process-wide, like the cache).
-	if (apiBase && *apiBase) setenv("PLUGINCIRCUIT_API", apiBase, 1);
-	if (cacheDir && *cacheDir) setenv("PLUGINCIRCUIT_HOME", cacheDir, 1);
+	auto set = [](const char *name, const char *value) {
+#if defined(_WIN32)
+		_putenv_s(name, value);
+#else
+		setenv(name, value, 1);
+#endif
+	};
+	if (apiBase && *apiBase) set("PLUGINCIRCUIT_API", apiBase);
+	if (cacheDir && *cacheDir) set("PLUGINCIRCUIT_HOME", cacheDir);
 }
 
 char *plugincircuit_search_json(const char *query, char *error, size_t errorCapacity) {

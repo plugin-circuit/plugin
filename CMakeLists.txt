@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.28)
 
 set(CMAKE_OSX_DEPLOYMENT_TARGET 11.0 CACHE STRING "")
-project(plugincircuit VERSION 0.1.0 LANGUAGES C CXX OBJC OBJCXX)
+project(plugincircuit VERSION 0.1.0 LANGUAGES C CXX)
+if (APPLE)
+	enable_language(OBJC OBJCXX) # the editor, tanh-net's NSURLSession client, the GUI tests
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -207,6 +210,11 @@ add_executable(plugincircuit-settings-test tests/settings_test.cpp src/plugin/St
 target_include_directories(plugincircuit-settings-test PRIVATE src)
 target_link_libraries(plugincircuit-settings-test PRIVATE plugincircuit-core)
 add_test(NAME settings COMMAND plugincircuit-settings-test)
+# the package in-use lock (flock / LockFileEx): no WCLAP needed, so it runs on every platform
+add_executable(plugincircuit-package-cache-test tests/package_cache_test.cpp)
+target_include_directories(plugincircuit-package-cache-test PRIVATE src)
+target_link_libraries(plugincircuit-package-cache-test PRIVATE plugincircuit-core)
+add_test(NAME package-cache COMMAND plugincircuit-package-cache-test)
 # the catalog check behind the app store (PLAN.md 5.1), against a local stand-in server
 add_executable(plugincircuit-catalog-health-test tests/catalog_health_test.cpp)
 target_include_directories(plugincircuit-catalog-health-test PRIVATE src)

@@ -46,7 +46,7 @@ public:
 	public:
 		InUse() = default;
 		explicit InUse(const std::string &sha256);
-		bool held() const { return fd_ >= 0; }
+		bool held() const { return fd_ != -1; }
 		~InUse();
 		InUse(InUse &&o) noexcept : fd_(o.fd_) { o.fd_ = -1; }
 		InUse &operator=(InUse &&o) noexcept;
@@ -54,7 +54,7 @@ public:
 		InUse &operator=(const InUse &) = delete;
 
 	private:
-		int fd_ = -1;
+		intptr_t fd_ = -1; // a file descriptor, or a Windows HANDLE
 	};
 };
 

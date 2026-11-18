@@ -9,7 +9,9 @@
 #include <sstream>
 
 #if defined(_WIN32)
-// TODO(windows): LockFileEx. Until then packages count as not in use.
+#	define WIN32_LEAN_AND_MEAN
+#	define NOMINMAX
+#	include <windows.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -86,18 +88,62 @@ void writeUsage(const fs::path &dir, const Usage &u) {
 	if (ec) fs::remove(tmp, ec);
 }
 
-#if !defined(_WIN32)
-// Try the exclusive lock: true if nobody holds the package (the caller then owns the returned fd).
-int tryExclusive(const fs::path &dir) {
-	int fd = ::open((dir / ".lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-	if (fd < 0) return -1;
-	if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-		::close(fd);
-		return -1;
-	}
-	return fd;
+// <package>/.lock: loaders hold a shared lock while a package is loaded (InUse); a delete or a listing takes the
+// exclusive one for a moment. flock on POSIX, LockFileEx on Windows (one byte), released when the file is closed.
+constexpr intptr_t kNoLock = -1;
+#if defined(_WIN32)
+intptr_t openLockFile(const fs::path &path) {
+	HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	                       nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	return h == INVALID_HANDLE_VALUE ? kNoLock : (intptr_t)h;
+}
+bool lockFile(intptr_t h, bool exclusive, bool wait) {
+	OVERLAPPED ov{};
+	const DWORD flags = (exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0) | (wait ? 0 : LOCKFILE_FAIL_IMMEDIATELY);
+	return LockFileEx((HANDLE)h, flags, 0, 1, 0, &ov) != 0;
+}
+void closeLockFile(intptr_t h) { CloseHandle((HANDLE)h); }
+// the locked file is still <package>/.lock (a delete moves the folder away): same volume and file index
+bool stillAt(intptr_t h, const fs::path &path) {
+	BY_HANDLE_FILE_INFORMATION locked{}, current{};
+	if (!GetFileInformationByHandle((HANDLE)h, &locked)) return false;
+	HANDLE c = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+	                       FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (c == INVALID_HANDLE_VALUE) return false;
+	const bool ok = GetFileInformationByHandle(c, &current) != 0;
+	CloseHandle(c);
+	return ok && locked.dwVolumeSerialNumber == current.dwVolumeSerialNumber &&
+	       locked.nFileIndexHigh == current.nFileIndexHigh && locked.nFileIndexLow == current.nFileIndexLow;
+}
+#else
+intptr_t openLockFile(const fs::path &path) {
+	const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+	return fd < 0 ? kNoLock : fd;
+}
+bool lockFile(intptr_t fd, bool exclusive, bool wait) {
+	int r;
+	do r = ::flock(int(fd), (exclusive ? LOCK_EX : LOCK_SH) | (wait ? 0 : LOCK_NB));
+	while (r != 0 && errno == EINTR);
+	return r == 0;
+}
+void closeLockFile(intptr_t fd) { ::close(int(fd)); }
+bool stillAt(intptr_t fd, const fs::path &path) {
+	struct stat locked {}, current {};
+	return ::fstat(int(fd), &locked) == 0 && ::stat(path.c_str(), &current) == 0 && locked.st_ino == current.st_ino &&
+	       locked.st_dev == current.st_dev;
 }
 #endif
+
+// Try the exclusive lock: held if nobody has the package loaded (the caller then closes the returned lock).
+intptr_t tryExclusive(const fs::path &dir) {
+	const intptr_t h = openLockFile(dir / ".lock");
+	if (h == kNoLock) return kNoLock;
+	if (!lockFile(h, true, false)) {
+		closeLockFile(h);
+		return kNoLock;
+	}
+	return h;
+}
 
 void readName(const fs::path &dir, CachedPackage &p) {
 	std::error_code ec;
@@ -139,10 +185,8 @@ std::vector<CachedPackage> PackageCache::list() {
 		}
 		p.lastUsed = u.lastUsed ? u.lastUsed : fileTime(e.path() / "bundle");
 		p.lastSaved = u.lastSaved;
-#if !defined(_WIN32)
-		if (int fd = tryExclusive(e.path()); fd >= 0) ::close(fd); // got it: nobody has it loaded
+		if (const intptr_t lock = tryExclusive(e.path()); lock != kNoLock) closeLockFile(lock); // got it: nobody has it loaded
 		else p.inUse = true;
-#endif
 		out.push_back(std::move(p));
 	}
 	return out;
@@ -183,18 +227,21 @@ bool PackageCache::remove(const std::string &sha256, std::string &why) {
 	auto dir = Paths::packages() / sha256;
 	std::error_code ec;
 	if (!fs::is_directory(dir, ec)) return true; // already gone
-#if !defined(_WIN32)
-	int fd = tryExclusive(dir);
-	if (fd < 0) {
+	const intptr_t lock = tryExclusive(dir);
+	if (lock == kNoLock) {
 		why = "in use";
 		return false;
 	}
-#endif
 	// Move it out of the way first (atomic), so a load never sees a half-deleted package, then delete.
 	auto trash = Paths::packages() / (".trash-" + sha256.substr(0, 12) + "-" + std::to_string(std::random_device{}()));
+#if defined(_WIN32)
+	// Windows may refuse to move a folder with an open file in it: release first. A loader that takes the shared lock
+	// in between finds afterwards that its .lock file moved away (InUse checks the file identity) and isn't held.
+	closeLockFile(lock);
 	fs::rename(dir, trash, ec);
-#if !defined(_WIN32)
-	::close(fd);
+#else
+	fs::rename(dir, trash, ec);
+	closeLockFile(lock);
 #endif
 	if (ec) {
 		why = ec.message();
@@ -242,43 +289,29 @@ std::string PackageCache::writeCompileCacheConfig() {
 }
 
 PackageCache::InUse::InUse(const std::string &sha256) {
-#if !defined(_WIN32)
 	if (!isHexSha(sha256)) return;
 	const auto dir = Paths::packages() / sha256;
 	std::error_code ec;
-	if (!fs::is_directory(dir, ec)) return; // O_CREAT must not recreate the folder of a deleted package
+	if (!fs::is_directory(dir, ec)) return; // opening .lock must not recreate the folder of a deleted package
 	const auto path = dir / ".lock";
-	fd_ = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-	if (fd_ < 0) return;
+	fd_ = openLockFile(path);
+	if (fd_ == kNoLock) return;
 	// Blocking: an exclusive holder (remove(), list()'s probe) keeps it only for a moment, and this runs on the loader.
-	int r;
-	do r = ::flock(fd_, LOCK_SH);
-	while (r != 0 && errno == EINTR);
-	// A delete may have won: it renames the folder away while holding the exclusive lock. Then the locked file is no
-	// longer <package>/.lock (the inode differs or the path is gone): not held.
-	struct stat locked {}, current {};
-	if (r != 0 || ::fstat(fd_, &locked) != 0 || ::stat(path.c_str(), &current) != 0 || locked.st_ino != current.st_ino ||
-	    locked.st_dev != current.st_dev) {
-		::close(fd_);
-		fd_ = -1;
+	// A delete may have won: it moves the folder away. Then the locked file is no longer <package>/.lock (another
+	// file, or the path is gone): not held.
+	if (!lockFile(fd_, false, true) || !stillAt(fd_, path)) {
+		closeLockFile(fd_);
+		fd_ = kNoLock;
 	}
-#else
-	(void)sha256;
-	fd_ = 0; // TODO(windows): LockFileEx; until then a package counts as held and not in use
-#endif
 }
 
 PackageCache::InUse::~InUse() {
-#if !defined(_WIN32)
-	if (fd_ >= 0) ::close(fd_);
-#endif
+	if (fd_ != kNoLock) closeLockFile(fd_);
 }
 
 PackageCache::InUse &PackageCache::InUse::operator=(InUse &&o) noexcept {
 	if (this != &o) {
-#if !defined(_WIN32)
-		if (fd_ >= 0) ::close(fd_);
-#endif
+		if (fd_ != kNoLock) closeLockFile(fd_);
 		fd_ = o.fd_;
 		o.fd_ = -1;
 	}

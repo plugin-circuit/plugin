@@ -1,0 +1,50 @@
+name: build_test
+
+# Build and test on every push and pull request, with plugin-circuit/ci-actions (pinned).
+# macOS: everything (the plugin formats, the test WCLAPs, all tests but the GUI ones).
+# Windows: the core and its tests only until the editor is ported (docs/WINDOWS.md, W1-W3): the plugin target
+# doesn't build there yet.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: build_test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS-arm64
+            os: macos-15
+            llvm: "true"
+            args: ""
+          - name: Windows-x86_64
+            os: windows-2022
+            llvm: "false"
+            args: "-DPLUGINCIRCUIT_BUILD_PLUGIN=OFF"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: plugin-circuit/ci-actions/setup-build-tools@v0.1.0
+        with:
+          LLVM: ${{ matrix.llvm }}
+      - uses: plugin-circuit/ci-actions/cache-deps@v0.1.0
+      - uses: plugin-circuit/ci-actions/cmake-build@v0.1.0
+        with:
+          BUILD_TYPE: RelWithDebInfo
+          CMAKE_BUILD_ARGS: ${{ matrix.args }}
+      # GUI tests (label gui) need a window session; they run locally for now
+      - uses: plugin-circuit/ci-actions/cmake-test@v0.1.0
+        with:
+          EXCLUDE_LABELS: gui

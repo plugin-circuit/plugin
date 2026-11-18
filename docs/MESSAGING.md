@@ -211,7 +211,7 @@ Today: only macros send gestures; parameter sliders send bare values (no gesture
 | `state` | the structure changed: plugin loaded, parameter list rescanned, mapping edited, status | the full snapshot, with a `version` |
 | `values` | some values changed | only the changed parameters and macros: `{id, value, text}`. Text comes from the WCLAP's `value_to_text`, called only for these. At most 30 per second, coalesced |
 | `status` | loading progress | status, message, progress |
-| `ack` | a gesture ended | the committed value and text for that parameter: the owner's copy now matches the truth |
+| `ack` | a gesture ended | the committed value and text for that parameter: the owner's copy now matches the truth (built as `ended: [{target, id}]` in the `params` store's patches) |
 
 How changes are noticed: the audio thread writes values into atomics and sets a bit in a preallocated "changed"
 bitset (one bit per parameter, no allocation, no lock). A main-thread timer swaps the bitset, reads those values,

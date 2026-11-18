@@ -277,10 +277,13 @@ void PluginCircuitPlugin::translateEvents(const clap_input_events *in, Slot *slo
 	gestures_.begin(table, sink); // closes gestures left open (a new table, unload, reset, the editor closing)
 	// UI-originated events first: they are stamped at time 0, so the list stays sorted
 	UiEvent ui;
+	uint64_t applied = 0;
 	while (drainUi && uiEvents_.pop(ui)) {
 		if (ui.kind == UiEvent::Macro) gestures_.uiMacro(map, ui.id, ui.value, ui.phase, sink);
 		else if (ui.kind == UiEvent::Param) gestures_.uiParam(map, ui.id, ui.value, ui.phase, sink);
+		++applied;
 	}
+	if (applied) uiEventsApplied_.fetch_add(applied, std::memory_order_release); // after the table holds them
 	while (drainNotes && uiNotes_.pop(ui)) {
 		clap_event_note n{{sizeof(n), 0, CLAP_CORE_EVENT_SPACE_ID, uint16_t(ui.kind == UiEvent::NoteOn ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF), 0},
 		                  -1, 0, 0, int16_t(ui.id), ui.value};
@@ -926,10 +929,15 @@ void PluginCircuitPlugin::uiEdit(bool macro, uint32_t id, double value, Phase ph
 		value = value < 0 ? 0 : (value > 1 ? 1 : value);
 	}
 	std::lock_guard<std::mutex> lock(uiPushMutex_);
+	const bool pushed = uiEvents_.push({macro ? UiEvent::Macro : UiEvent::Param, phase, id, value});
+	if (pushed) ++uiEventsPushed_;
 	// queue full (nothing processes or flushes): a lost end would leave the parameter ours for good, so close
-	// the UI's gestures at the next process / flush instead
-	if (!uiEvents_.push({macro ? UiEvent::Macro : UiEvent::Param, phase, id, value}) && phase == Phase::End)
-		gestures_.requestCloseUi();
+	// the UI's gestures at the next process / flush instead (it drains the queue: the ack follows then too)
+	if (!pushed && phase == Phase::End) gestures_.requestCloseUi();
+	if (phase == Phase::End) {
+		if (pendingEnds_.size() >= 256) pendingEnds_.pop_front(); // nobody reads them (the page isn't subscribed)
+		pendingEnds_.push_back({macro, id, uiEventsPushed_});
+	}
 	if (!processing_ && hostParams_) hostParams_->request_flush(host_);
 }
 

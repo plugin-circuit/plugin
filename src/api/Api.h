@@ -26,6 +26,15 @@ public:
 	using View = choc::value::ValueView;
 	static constexpr int kProtocol = 1;
 
+	// Combines values into a store's stamp. A full 64-bit mix: an XOR-and-multiply step (FNV) let small counters
+	// cancel out (version 10 + status 1 stamped the same as version 15 + status 4), so a change was never sent.
+	static uint64_t mix(uint64_t h, uint64_t v) {
+		uint64_t x = h ^ (v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2));
+		x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull; // splitmix64's finalizer
+		x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+		return x ^ (x >> 31);
+	}
+
 	// A store read whole. `stamp` is cheap and changes whenever the value may have: a patch (the whole value) goes
 	// out when it does. `set` validates and applies a change: "" when done, else the error.
 	struct Store {

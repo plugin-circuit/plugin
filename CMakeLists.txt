@@ -223,8 +223,9 @@ if (PLUGINCIRCUIT_BUILD_PLUGIN AND APPLE)
 	# a drag in the Macros view reaches the DAW as gesture begin, values, gesture end, in order (PLAN.md phase 2)
 	add_test(NAME ui-gesture COMMAND plugincircuit-editor-resize-test ${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap refuse "" 9) # the script runs ~5 s in
 	set_tests_properties(ui-gesture PROPERTIES LABELS gui RUN_SERIAL TRUE TIMEOUT 30
-		ENVIRONMENT "PLUGINCIRCUIT_UI_JS=setTimeout(() => (edit('macro', 0, 0.2, 'begin'), edit('macro', 0, 0.5, 'update'), edit('macro', 0, 0.6, 'end')), 500)"
-		PASS_REGULAR_EXPRESSION "daw events: \\[B0 D0=0.2 D0=0.5 D0=0.6 E0\\]")
+		# the core acknowledges the end in the params store (PLAN 2.4); logged to stderr, before the DAW's events
+		ENVIRONMENT "PLUGINCIRCUIT_UI_JS=const receive = api.receive, acked = (m) => m.kind === 'patch' && m.topic === 'params' && (m.data.ended || []).some((e) => e.target === 'macro' && e.id === 0), x = (api.receive = (m) => (acked(m) && api.command('app.log', { text: 'acked m0' }), receive(m))), y = setTimeout(() => (edit('macro', 0, 0.2, 'begin'), edit('macro', 0, 0.5, 'update'), edit('macro', 0, 0.6, 'end')), 500)"
+		PASS_REGULAR_EXPRESSION "acked m0.*daw events: \\[B0 D0=0.2 D0=0.5 D0=0.6 E0\\]")
 endif()
 
 # --- libplugincircuit: the C SDK for third-party hosts (MVP step 3) -----------------------------

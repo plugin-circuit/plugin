@@ -160,8 +160,12 @@ page talks through `plugincircuitRequest` / `plugincircuitReceive` (`host-ui/api
 Tests: `api` (registry), `host-ui-stores` (14 checks: views from stores, deltas, stale patches, a set racing its
 patches, subscriptions while shown), `host-ui-picker-messages` on the mock core, the GUI tests unchanged.
 Found by the picker test: the first `ui` value must apply even when the view matches the page's default (else the
-picker never loads). Open: 2.4's `ack` at a gesture's end (the UI still waits 120 ms after a drag before taking
-values again).
+picker never loads). 2.4's `ack` followed: the params store's patches carry `ended: [{target, id}]` once the audio
+side has applied a drag's end (UI events are FIFO: an end pushed as event n is applied when the applied count
+reaches n); until then the page keeps the dragged value its own (2 s at most, should no process or flush come).
+It replaces the 120 ms wait. Found at the same time: the stores' stamp mix (an FNV step) let small counters cancel
+out (version 10 + "fetching" stamped the same as version 15 + "ready"), so the `plugin` store once stayed at
+"fetching"; `Api::mix` is now a full 64-bit mix.
 
 **3.1 `src/api/Api.h/.cpp`: the registry**, the only dispatch the editor calls.
 - `store(name, schema?, get, set)` with a version per store; `patch` = the changed part plus the new version.

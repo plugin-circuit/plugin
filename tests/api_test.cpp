@@ -21,6 +21,10 @@ static int failures = 0;
 static Api::Value args(const std::string &json) { return choc::json::parse(json); }
 
 int main() {
+	// stamps: small counters must not cancel out (the plugin store's version + status stayed "fetching" once)
+	CHECK(Api::mix(Api::mix(10, 1), 0) != Api::mix(Api::mix(15, 4), 0));
+	CHECK(Api::mix(3, 4) != Api::mix(4, 3));
+
 	Api api;
 	std::vector<Api::Value> sent;
 	api.send = [&](const Api::Value &m) { sent.push_back(m); };

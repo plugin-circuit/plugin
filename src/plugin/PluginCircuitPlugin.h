@@ -23,6 +23,7 @@
 #include <array>
 #include <bitset>
 #include <chrono>
+#include <deque>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -240,6 +241,17 @@ private:
 	choc::fifo::SingleReaderSingleWriterFIFO<UiEvent> uiNotes_; // own queue: parameter flushes never drain notes
 	std::mutex uiPushMutex_; // UI pushes come from the main thread only, but keep pushes serialised
 	std::bitset<128> uiHeldNotes_; // main thread: notes the UI has started and not yet released
+	// A drag's end is acknowledged once the audio side has applied it (docs/PLAN.md 2.4): uiEvents_ is FIFO, so an
+	// end pushed as event n is applied when uiEventsApplied_ reaches n. The params store reports it as `ended`.
+	std::atomic<uint64_t> uiEventsApplied_{0}; // [audio-thread] writes
+	uint64_t uiEventsPushed_ = 0;               // main thread, under uiPushMutex_
+	struct PendingEnd {
+		bool macro;
+		uint32_t id;
+		uint64_t seq;
+	};
+	std::deque<PendingEnd> pendingEnds_; // main thread
+	choc::value::Value takeEnded();       // main thread: the ends applied since the last call
 
 	// installed packages for the snapshot: a disk scan, so cached (main thread)
 	std::vector<CatalogPlugin> installedCache_;

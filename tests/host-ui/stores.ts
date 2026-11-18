@@ -2,6 +2,7 @@
 //   - the plugin pill and the Params view render from the plugin and params stores (the view virtualized)
 //   - a params delta patch updates a row; a stale patch (not newer) is ignored
 //   - a store.set racing its patches: one built before the set doesn't undo it, the one after it applies
+//   - a dragged value stays the page's until the core acknowledges the drag's end
 //   - the settings page subscribes to its stores and stream only while shown
 //
 // Run: bun tests/host-ui/stores.ts   (uses Playwright from ../website/node_modules)
@@ -49,6 +50,22 @@ await page.evaluate(() => {
 })
 const afterStale = await page.evaluate(() => document.querySelector('#params .param[data-id="0"] .ptext')?.textContent)
 check(afterStale === "new", "a stale patch is ignored", afterStale)
+
+// a drag's end (PLAN 2.4): the dragged value stays the page's until the core reports the end applied
+const box = await page.locator('#params .param[data-id="1"] .slider').boundingBox()
+await page.mouse.move(box.x + box.width * 0.5, box.y + box.height / 2)
+await page.mouse.down()
+await page.mouse.move(box.x + box.width * 0.8, box.y + box.height / 2, { steps: 4 })
+await page.mouse.up()
+const valueOf1 = () => page.evaluate(() => (0, eval)("state.paramValues.get(1).value"))
+const dragged = await valueOf1()
+await page.waitForTimeout(300) // longer than the 120 ms the page used to wait
+await page.evaluate(() => (window as any).__patch("params", { full: false, values: [{ id: 1, value: 0.5, text: "old" }] }, false))
+check(Math.abs(dragged - 0.8) < 0.05 && (await valueOf1()) === dragged, "a value from before the end is applied doesn't undo the drag", [dragged, await valueOf1()])
+await page.evaluate(() => (window as any).__patch("params", { full: false, ended: [{ target: "param", id: 1 }], values: [{ id: 1, value: 0.3, text: "plugin" }] }, false))
+check((await valueOf1()) === 0.3, "after the core's ack the value is the plugin's again", await valueOf1())
+const ends = await page.evaluate(() => (window as any).__requests.filter((r: any) => r.name === "edit" && r.args.id === 1).map((r: any) => r.args.phase))
+check(ends[0] === "begin" && ends[ends.length - 1] === "end", "the drag sends begin ... end", ends)
 
 // switching the view: the core has a patch from before the set in flight (view "params"), answers the set, then
 // sends the patch after it (view "macros", and more: innerGui)

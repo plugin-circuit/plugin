@@ -24,7 +24,6 @@ double number(const View &a, const char *key, double fallback = 0) {
 std::string text(const View &a, const char *key) {
 	return a.isObject() && a.hasObjectMember(key) && a[key].isString() ? std::string(a[key].getString()) : std::string();
 }
-uint64_t mix(uint64_t h, uint64_t v) { return (h ^ v) * 0x100000001b3ull; } // FNV-1a step: a cheap change stamp
 
 // Every settable store rejects keys it doesn't know (a typo shouldn't pass silently).
 std::string unknownKey(const View &v, std::initializer_list<const char *> known) {
@@ -119,7 +118,7 @@ void PluginCircuitPlugin::registerApi(Api &api) {
 	                     },
 	                     [this] {
 		                     // not the installed list: reading it rescans the packages (every 5 s); it follows any other change
-		                     return mix(mix(stateVersion_.load(), uint64_t(status_.load())), std::bit_cast<uint64_t>(downloadProgress_.load()));
+		                     return Api::mix(Api::mix(stateVersion_.load(), uint64_t(status_.load())), std::bit_cast<uint64_t>(downloadProgress_.load()));
 	                     },
 	                     {}});
 
@@ -132,11 +131,12 @@ void PluginCircuitPlugin::registerApi(Api &api) {
 		                          auto *table = paramTable();
 		                          const uint64_t generation = table ? table->generation() : 0;
 		                          if (generation != paramsGeneration_) return paramsFull(); // a new shape: everything
-		                          if (!table) return std::nullopt;
-		                          auto values = paramValues(*table, false);
-		                          if (values.size() == 0) return std::nullopt;
+		                          auto ended = takeEnded(); // first: a value read after it is the plugin's again
+		                          auto values = table ? paramValues(*table, false) : choc::value::createEmptyArray();
+		                          if (values.size() == 0 && ended.size() == 0) return std::nullopt;
 		                          auto patch = choc::value::createObject("Params", "full", false);
 		                          patch.addMember("values", values);
+		                          patch.addMember("ended", ended);
 		                          return patch;
 	                          },
 	                          {}});
@@ -184,8 +184,8 @@ void PluginCircuitPlugin::registerApi(Api &api) {
 		                     return v;
 	                     },
 	                     [this] {
-		                     uint64_t h = mix(0xcbf29ce484222325ull, reinterpret_cast<uintptr_t>(macros_.load()));
-		                     for (auto &v : macroValues_) h = mix(h, std::bit_cast<uint64_t>(v.load()));
+		                     uint64_t h = Api::mix(0xcbf29ce484222325ull, reinterpret_cast<uintptr_t>(macros_.load()));
+		                     for (auto &v : macroValues_) h = Api::mix(h, std::bit_cast<uint64_t>(v.load()));
 		                     return h;
 	                     },
 	                     {}});
@@ -264,7 +264,7 @@ void PluginCircuitPlugin::registerApi(Api &api) {
 		                    v.addMember("packages", list);
 		                    return v;
 	                    },
-	                    [this] { return mix(cacheVersion_, stateVersion_.load()); }, // a load or unload changes "in use"
+	                    [this] { return Api::mix(cacheVersion_, stateVersion_.load()); }, // a load or unload changes "in use"
 	                    {}});
 	api.command("cache.delete", [this](const View &a, std::string &) { // {shas: [...]}: skips packages in use
 		int deleted = 0;
@@ -297,6 +297,18 @@ void PluginCircuitPlugin::registerApi(Api &api) {
 	}, 10);
 }
 
+// A drag's end, once applied: {target, id} each. The page keeps a dragged value its own until then.
+Value PluginCircuitPlugin::takeEnded() {
+	const uint64_t applied = uiEventsApplied_.load(std::memory_order_acquire);
+	auto ended = choc::value::createEmptyArray();
+	while (!pendingEnds_.empty() && pendingEnds_.front().seq <= applied) {
+		auto &e = pendingEnds_.front();
+		ended.addArrayElement(choc::value::createObject("E", "target", e.macro ? "macro" : "param", "id", (int64_t)e.id));
+		pendingEnds_.pop_front();
+	}
+	return ended;
+}
+
 Value PluginCircuitPlugin::paramsFull() {
 	auto *table = paramTable();
 	paramsGeneration_ = table ? table->generation() : 0;
@@ -307,6 +319,7 @@ Value PluginCircuitPlugin::paramsFull() {
 			                                                "max", p.maxValue, "default", p.defaultValue, "stepped", p.stepped(),
 			                                                "automatable", p.automatable(), "hidden", (p.flags & CLAP_PARAM_IS_HIDDEN) != 0));
 	auto v = choc::value::createObject("Params", "full", true);
+	v.addMember("ended", takeEnded());
 	v.addMember("infos", infos);
 	v.addMember("values", table ? paramValues(*table, true) : choc::value::createEmptyArray());
 	return v;

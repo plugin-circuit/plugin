@@ -27,7 +27,8 @@ const state = {
   paramValues: new Map(), // id -> {value, text}
   view: "browse",
   page: 0,
-  dragging: new Set(), // "m3" / "p1234" while the user drags: ignore host echoes
+  dragging: new Map(), // "m3" / "p1234" -> drags not yet ended in the core: its values are ours, ignore the core's
+  endWaiters: new Map(), // key -> callbacks, one per drag released by the user and not yet acknowledged
   pickerSrc: "",
   editSlot: -1,
   wasLoading: false,
@@ -64,6 +65,8 @@ function subscribeStores() {
     render(rebuild);
   });
   api.subscribe("params", (d) => {
+    // ends the core has applied (PLAN 2.4): before the values, which are the plugin's again from here
+    for (const e of d.ended || []) (state.endWaiters.get((e.target === "macro" ? "m" : "p") + e.id) || [])[0]?.();
     if (d.full) { state.snap.params = d.infos; state.paramValues = new Map(); }
     mergeParamValues(d.values);
     render(d.full);
@@ -293,7 +296,7 @@ function bindDrag(target, key, get, set, axis, reset) {
   target.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     target.setPointerCapture(e.pointerId);
-    state.dragging.add(key);
+    state.dragging.set(key, (state.dragging.get(key) || 0) + 1);
     const rect = target.getBoundingClientRect();
     let last = axis === "vertical" ? e.clientY : e.clientX;
     if (axis === "horizontal") set(Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)), "begin");
@@ -314,10 +317,24 @@ function bindDrag(target, key, get, set, axis, reset) {
       ended = true;
       target.removeEventListener("pointermove", move);
       set(get(), "end");
-      setTimeout(() => {
-        state.dragging.delete(key);
+      // the value stays ours until the core reports the end applied (the params store's `ended`); 2 s at most,
+      // should no ack come (the DAW neither processes nor flushes)
+      let done = false;
+      const release = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        const waiters = state.endWaiters.get(key);
+        waiters.splice(waiters.indexOf(release), 1);
+        if (!waiters.length) state.endWaiters.delete(key);
+        const n = state.dragging.get(key) - 1;
+        if (n > 0) state.dragging.set(key, n);
+        else state.dragging.delete(key);
         if (state.dragging.size === 0 && state.pendingRebuild) render(true);
-      }, 120);
+      };
+      const timer = setTimeout(release, 2000);
+      if (!state.endWaiters.has(key)) state.endWaiters.set(key, []);
+      state.endWaiters.get(key).push(release);
     };
     target.addEventListener("pointermove", move);
     target.addEventListener("pointerup", up, { once: true });

@@ -4,6 +4,7 @@
 #include "core/BridgeLog.h"
 #include "core/Catalog.h"
 #include "core/InnerHost.h"
+#include "core/Util.h"
 #include "core/WclapLibrary.h"
 
 #include <atomic>
@@ -11,8 +12,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <random>
+#include <string>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 using namespace plugincircuit;
@@ -73,16 +75,22 @@ int main(int argc, char **argv) {
 	}
 
 	// ---- a WCLAP that traps
-	char home[] = "/tmp/plugincircuit-errors-XXXXXX";
-	if (!mkdtemp(home)) return 1;
-	setenv("PLUGINCIRCUIT_HOME", home, 1);
+	const auto home = fs::temp_directory_path() / ("plugincircuit-errors-" + std::to_string(std::random_device{}()));
+	std::error_code ec;
+	fs::create_directories(home, ec);
+	if (ec) return 1;
+#if defined(_WIN32)
+	_putenv_s("PLUGINCIRCUIT_HOME", home.string().c_str());
+#else
+	setenv("PLUGINCIRCUIT_HOME", home.c_str(), 1);
+#endif
 	std::ifstream f(argv[1], std::ios::binary);
 	std::vector<uint8_t> archive((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 	std::string sha, error;
 	const auto bundle = Catalog::installArchive(archive, sha, error);
 	CHECK(!bundle.empty());
 	if (bundle.empty()) return 1;
-	auto module = WclapLibrary::open(bundle.string(), (fs::path(home) / "data").string(), error);
+	auto module = WclapLibrary::open(bundle.string(), (home / "data").string(), error);
 	CHECK(module != nullptr);
 	if (!module) return 1;
 	CHECK(module->error().empty());

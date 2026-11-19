@@ -172,16 +172,23 @@ enable_testing()
 add_executable(plugincircuit-editor-layout-test tests/editor_layout_test.cpp)
 target_include_directories(plugincircuit-editor-layout-test PRIVATE src)
 add_test(NAME editor-layout COMMAND plugincircuit-editor-layout-test)
-# Test WCLAPs (tests/wclaps): freestanding C, built with Homebrew LLVM (clang with wasm32) and wasm-ld when available
-find_program(WASM_LD_EXECUTABLE wasm-ld)
-if (APPLE AND EXISTS /opt/homebrew/opt/llvm/bin/clang AND WASM_LD_EXECUTABLE)
+# Test WCLAPs (tests/wclaps): freestanding C, built with LLVM's clang (wasm32 target) and wasm-ld when available.
+# Apple's clang has no wasm32 target, so on macOS only Homebrew's LLVM counts; Windows runners ship LLVM.
+if (APPLE)
+	find_program(WASM_CLANG_EXECUTABLE clang PATHS /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin NO_DEFAULT_PATH)
+else()
+	find_program(WASM_CLANG_EXECUTABLE clang PATHS "$ENV{ProgramFiles}/LLVM/bin")
+endif()
+find_program(WASM_LD_EXECUTABLE wasm-ld PATHS /opt/homebrew/opt/lld/bin /opt/homebrew/opt/llvm/bin "$ENV{ProgramFiles}/LLVM/bin")
+if (WASM_CLANG_EXECUTABLE AND WASM_LD_EXECUTABLE)
 	set(TEST_WCLAPS_DIR ${CMAKE_BINARY_DIR}/test-wclaps)
+	file(GLOB TEST_WCLAPS_UI CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/ui/*/*)
 	add_custom_command(OUTPUT ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz
-		COMMAND ${CMAKE_COMMAND} -E env OUT=${TEST_WCLAPS_DIR} CLAP_INCLUDE=${wclap-bridge_SOURCE_DIR}/modules/clap/include
-			bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/build.sh
+		COMMAND ${CMAKE_COMMAND} -DCLANG=${WASM_CLANG_EXECUTABLE} -DWASM_LD=${WASM_LD_EXECUTABLE}
+			-DCLAP_INCLUDE=${wclap-bridge_SOURCE_DIR}/modules/clap/include -DOUT=${TEST_WCLAPS_DIR}
+			-P ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/build.cmake
 		DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/src/plugin.c ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/src/rt.c
-			${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/build.sh
-			${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/ui/gain/index.html ${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/ui/features/index.html
+			${CMAKE_CURRENT_SOURCE_DIR}/tests/wclaps/build.cmake ${TEST_WCLAPS_UI}
 		COMMENT "Building the test WCLAPs")
 	add_custom_target(test-wclaps ALL DEPENDS ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz)
 	if (PLUGINCIRCUIT_BUILD_PLUGIN)
@@ -193,6 +200,11 @@ if (APPLE AND EXISTS /opt/homebrew/opt/llvm/bin/clang AND WASM_LD_EXECUTABLE)
 		add_test(NAME plugin-param-events COMMAND plugincircuit-plugin-param-events-test
 			${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz)
 	endif()
+	# load, process, parameters and state through Wasmtime, on every platform (smoke installs into its own home)
+	foreach(name test-gain test-sine test-lookahead)
+		add_test(NAME smoke-${name} COMMAND plugincircuit-smoke ${TEST_WCLAPS_DIR}/dist/${name}.wclap.tar.gz --json --params --blocks 50)
+		set_tests_properties(smoke-${name} PROPERTIES ENVIRONMENT "PLUGINCIRCUIT_HOME=${CMAKE_BINARY_DIR}/smoke-home")
+	endforeach()
 	# the bridge's diagnostics and a trapping WCLAP (PLAN.md 5.2)
 	add_executable(plugincircuit-plugin-errors-test tests/plugin_errors_test.cpp)
 	target_link_libraries(plugincircuit-plugin-errors-test PRIVATE plugincircuit-core)

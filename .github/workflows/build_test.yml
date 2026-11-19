@@ -2,7 +2,7 @@ name: build_test
 
 # Build and test on every push and pull request, with plugin-circuit/ci-actions (pinned).
 # macOS: everything (the plugin formats, the test WCLAPs, all tests but the GUI ones).
-# Windows: the core and its tests only until the editor is ported (docs/WINDOWS.md, W1-W3): the plugin target
+# Windows: the core, the test WCLAPs (the runner's preinstalled LLVM) and their tests, until the editor is ported (docs/WINDOWS.md, W1-W3): the plugin target
 # doesn't build there yet.
 
 on:

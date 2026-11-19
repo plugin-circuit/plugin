@@ -167,6 +167,11 @@ make_clapfirst_plugins(
 	STANDALONE_CONFIGURATIONS
 		standalone "PluginCircuit" "studio.plugincircuit.host.synth"
 		standalone_fx "PluginCircuit FX" "studio.plugincircuit.host.fx")
+if (WIN32) # clap-wrapper's Windows standalone uses C++/WinRT: RoGetActivationFactory and friends
+	foreach(sa PluginCircuit_standalone PluginCircuit_standalone_fx)
+		target_link_libraries(${sa} PRIVATE runtimeobject)
+	endforeach()
+endif()
 # clap-wrapper copies the icon to Resources/Icon.icns but its Info.plist template leaves CFBundleIconFile empty
 if (APPLE)
 	foreach(sa PluginCircuit_standalone PluginCircuit_standalone_fx)
@@ -332,5 +337,8 @@ endif()
 add_library(plugincircuit STATIC src/sdk/PluginCircuitC.cpp)
 target_include_directories(plugincircuit PUBLIC include ${wclap-bridge_SOURCE_DIR}/modules/clap/include)
 target_link_libraries(plugincircuit PRIVATE plugincircuit-core)
+if (WIN32) # plugincircuit.lib would clash with the CLAP's import library PluginCircuit.lib (file names ignore case)
+	set_target_properties(plugincircuit PROPERTIES OUTPUT_NAME libplugincircuit)
+endif()
 add_executable(plugincircuit-render examples/render.c)
 target_link_libraries(plugincircuit-render PRIVATE plugincircuit plugincircuit-core)

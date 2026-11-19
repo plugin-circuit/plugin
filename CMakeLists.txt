@@ -48,6 +48,17 @@ FetchContent_Declare(wclap-bridge
 	UPDATE_DISCONNECTED ON
 	SOURCE_SUBDIR do-not-add) # added manually below, after clap-wrapper
 FetchContent_MakeAvailable(wclap-bridge)
+# wclap-cpp (a bridge submodule, upstream WebCLAP) fix for MSVC, applied once: see cmake/patches/
+set(WCLAP_CPP_DIR ${wclap-bridge_SOURCE_DIR}/modules/wclap-cpp)
+set(WCLAP_CPP_PATCH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/wclap-cpp-msvc-scoped.patch)
+execute_process(COMMAND git apply --reverse --check ${WCLAP_CPP_PATCH} WORKING_DIRECTORY ${WCLAP_CPP_DIR}
+	RESULT_VARIABLE wclap_cpp_patched OUTPUT_QUIET ERROR_QUIET)
+if (NOT wclap_cpp_patched EQUAL 0)
+	execute_process(COMMAND git apply ${WCLAP_CPP_PATCH} WORKING_DIRECTORY ${WCLAP_CPP_DIR} RESULT_VARIABLE rc)
+	if (NOT rc EQUAL 0)
+		message(FATAL_ERROR "Couldn't apply ${WCLAP_CPP_PATCH}")
+	endif()
+endif()
 add_subdirectory(${wclap-bridge_SOURCE_DIR} wclap-bridge-build EXCLUDE_FROM_ALL)
 set(CHOC_DIR ${wclap-bridge_SOURCE_DIR}/modules/choc)
 

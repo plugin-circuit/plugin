@@ -1,0 +1,12 @@
+--- a/include/wclap/memory-arena.hpp
++++ b/include/wclap/memory-arena.hpp
+@@ -166,7 +166,8 @@
+ 	}
+ 	typename Arena::Scoped scoped() {
+ 		auto arena = getOrCreate();
+-		return {*arena, std::move(arena)};
++		Arena &ref = *arena; // before the move: MSVC builds the by-value unique_ptr argument first
++		return {ref, std::move(arena)};
+ 	}
+ private:
+ 	Instance *instance;

@@ -31,13 +31,15 @@
 #include <random>
 #include <vector>
 
+#include "../tools/ClapLoad.h"
+
+static void setEnv(const char *name, const char *value) {
 #if defined(_WIN32)
-#	include <windows.h>
-static void setEnv(const char *name, const char *value) { _putenv_s(name, value); }
+	_putenv_s(name, value);
 #else
-#	include <dlfcn.h>
-static void setEnv(const char *name, const char *value) { setenv(name, value, 1); }
+	setenv(name, value, 1);
 #endif
+}
 
 using namespace plugincircuit;
 
@@ -168,22 +170,8 @@ int main(int argc, char **argv) {
 	session.instance = choc::json::parse(R"({"view": "macros", "keyboardBase": 72})"); // instance settings (phase 4)
 
 	constexpr uint32_t frames = 256;
-#if defined(_WIN32)
-	HMODULE lib = LoadLibraryA(argv[1]); // a .clap is a DLL on Windows
-	if (!lib) {
-		std::printf("LoadLibrary failed: %lu\n", GetLastError());
-		return 1;
-	}
-	auto *entry = (const clap_plugin_entry *)GetProcAddress(lib, "clap_entry");
-#else
-	std::string bin = std::string(argv[1]) + "/Contents/MacOS/PluginCircuit";
-	void *lib = dlopen(bin.c_str(), RTLD_NOW);
-	if (!lib) {
-		std::printf("dlopen: %s\n", dlerror());
-		return 1;
-	}
-	auto *entry = (const clap_plugin_entry *)dlsym(lib, "clap_entry");
-#endif
+	auto *entry = loadClapEntry(argv[1]);
+	if (!entry) return 1;
 	entry->init(argv[1]);
 	auto *factory = (const clap_plugin_factory *)entry->get_factory(CLAP_PLUGIN_FACTORY_ID);
 	// an instance of Plugin Circuit with the session loaded, processing

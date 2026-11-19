@@ -11,7 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <dlfcn.h>
+#include "ClapLoad.h"
 #include <string>
 #include <thread>
 #include <vector>
@@ -48,10 +48,8 @@ int main(int argc, char **argv) {
 		return 2;
 	}
 	const bool instrument = std::string(argv[2]) == "synth";
-	std::string bin = std::string(argv[1]) + "/Contents/MacOS/PluginCircuit";
-	void *lib = dlopen(bin.c_str(), RTLD_NOW);
-	if (!lib) { std::printf("dlopen: %s\n", dlerror()); return 1; }
-	auto *entry = (const clap_plugin_entry *)dlsym(lib, "clap_entry");
+	auto *entry = loadClapEntry(argv[1]);
+	if (!entry) return 1;
 	entry->init(argv[1]);
 	auto *factory = (const clap_plugin_factory *)entry->get_factory(CLAP_PLUGIN_FACTORY_ID);
 	auto *p = factory->create_plugin(factory, &host, instrument ? "studio.plugincircuit.host.synth" : "studio.plugincircuit.host.fx");

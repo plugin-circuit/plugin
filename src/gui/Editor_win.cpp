@@ -57,7 +57,7 @@ struct WindowClass {
 		wc.cbSize = sizeof(wc);
 		wc.lpfnWndProc = proc;
 		wc.hInstance = thisModule();
-		wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+		wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)) /* IDC_ARROW */;
 		wc.hbrBackground = CreateSolidBrush(RGB(0x15, 0x1b, 0x24)); // the header's colour, behind everything
 		wc.lpszClassName = name;
 		RegisterClassExW(&wc); // fails harmlessly if another instance in this module registered it

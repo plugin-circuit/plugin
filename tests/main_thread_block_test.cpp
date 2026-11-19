@@ -5,13 +5,14 @@
 //   export  N webview messages (default {"t":"render"}: Spiral303's Export WAV, an offline render inside receive())
 //   busy    3 s of short calls, as the UI did before the parameter table: value_to_text for every parameter, over
 //           and over
+//   state   N state loads (save once, then load that state again every 100 ms): a preset or project load
 //   table   3 s of the UI's traffic since (docs/PLAN.md phase 6, rates measured in the editor): on each 50 ms tick
 //           the safety net's get_value (64 a second, round robin), and once a second texts for 40 rows (a scroll)
 // A single-threaded WCLAP (no shared memory) shares one instance between both threads. The upstream bridge made the
 // audio thread wait for the main thread; ours spins for at most <ratio> of the block, then skips the block (to compare
 // with blocking, build against a bridge checkout without that commit).
 //
-// Usage: plugincircuit-main-thread-block-test <bundle-dir> <pluginId> export|busy|table [--ratio R] [--count N]
+// Usage: plugincircuit-main-thread-block-test <bundle-dir> <pluginId> export|busy|table|state [--ratio R] [--count N]
 //                                             [--message JSON] [--frames F]
 // Reports the worst process() time, blocks slower than real time (a device underrun: what you hear as a click or
 // gap) and blocks the bridge skipped. Passes if no block was slower than real time.
@@ -69,7 +70,7 @@ clap_event_note note(uint16_t type, int16_t key) {
 
 int main(int argc, char **argv) {
 	if (argc < 4) {
-		std::fprintf(stderr, "usage: %s <bundle-dir> <pluginId> export|busy|table [--ratio R] [--count N] [--message JSON] [--frames F]\n", argv[0]);
+		std::fprintf(stderr, "usage: %s <bundle-dir> <pluginId> export|busy|table|state [--ratio R] [--count N] [--message JSON] [--frames F]\n", argv[0]);
 		return 2;
 	}
 	mainId = std::this_thread::get_id();
@@ -185,6 +186,19 @@ int main(int argc, char **argv) {
 		for (int i = 0; i < count; ++i, ++calls) {
 			const auto t0 = clock_type::now();
 			webview->receive(inner->plugin(), message.data(), uint32_t(message.size()));
+			longestCallMs = std::max(longestCallMs, std::chrono::duration<double, std::milli>(clock_type::now() - t0).count());
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+	} else if (scenario == "state") {
+		std::vector<uint8_t> saved;
+		if (!inner->saveState(saved)) {
+			std::fprintf(stderr, "saveState failed\n");
+			return 1;
+		}
+		std::printf("state: %zu bytes\n", saved.size());
+		for (int i = 0; i < count; ++i, ++calls) {
+			const auto t0 = clock_type::now();
+			if (!inner->loadState(saved)) std::fprintf(stderr, "loadState %d failed\n", i);
 			longestCallMs = std::max(longestCallMs, std::chrono::duration<double, std::milli>(clock_type::now() - t0).count());
 			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		}

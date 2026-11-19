@@ -49,3 +49,12 @@ jobs:
       - uses: plugin-circuit/ci-actions/cmake-test@v0.1.2
         with:
           EXCLUDE_LABELS: gui
+      # a crash on Windows prints nothing: rerun one WCLAP test under cdb for the stack
+      - name: crash stack (Windows)
+        if: failure() && startsWith(matrix.name, 'Windows')
+        shell: pwsh
+        run: |
+          $cdb = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" -ErrorAction SilentlyContinue
+          if (-not $cdb) { Write-Output "cdb not found"; exit 0 }
+          $env:PLUGINCIRCUIT_HOME = "$PWD\build\smoke-home"
+          & $cdb.FullName -g -G -lines -y "$PWD\build" -c ".lines -e; .ecxr; kpn 40; q" build\plugincircuit-smoke.exe build\test-wclaps\dist\test-gain.wclap.tar.gz --json

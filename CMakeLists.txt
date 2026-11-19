@@ -129,14 +129,21 @@ add_library(plugincircuit-impl STATIC
 	src/plugin/PluginApi.cpp
 	src/plugin/Macros.cpp
 	src/plugin/StateCodec.cpp
-	src/gui/Editor.mm
+	src/gui/EditorCore.cpp
 	${CMAKE_CURRENT_BINARY_DIR}/generated/HostUiResources.cpp)
+if (APPLE)
+	target_sources(plugincircuit-impl PRIVATE src/gui/Editor_mac.mm)
+elseif (WIN32)
+	target_sources(plugincircuit-impl PRIVATE src/gui/Editor_win.cpp)
+else()
+	message(FATAL_ERROR "The editor has no Linux part yet: configure with -DPLUGINCIRCUIT_BUILD_PLUGIN=OFF")
+endif()
 target_link_libraries(plugincircuit-impl PUBLIC plugincircuit-core clap)
 target_include_directories(plugincircuit-impl PRIVATE ${clap-wrapper_SOURCE_DIR}/include)
 target_compile_definitions(plugincircuit-impl PUBLIC PLUGINCIRCUIT_VERSION="${PROJECT_VERSION}")
 if (APPLE)
 	target_link_libraries(plugincircuit-impl PUBLIC "-framework Cocoa" "-framework WebKit" "-framework QuartzCore")
-	set_source_files_properties(src/gui/Editor.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+	set_source_files_properties(src/gui/Editor_mac.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 endif()
 
 # clap-wrapper v0.12.1 reads a misspelled C1ST_BUNDLE_IDENTIFER for the VST3 and AUv2 bundle ids (make_clapfirst.cmake),
@@ -149,7 +156,7 @@ make_clapfirst_plugins(
 	ENTRY_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/src/plugin/Entry.cpp
 	BUNDLE_IDENTIFIER "studio.plugincircuit.host"
 	BUNDLE_VERSION "${PROJECT_VERSION}"
-	PLUGIN_FORMATS CLAP VST3 AUV2
+	PLUGIN_FORMATS CLAP VST3 AUV2 # clap-wrapper builds the AUv2 on macOS only
 	COPY_AFTER_BUILD FALSE
 	ASSET_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins
 	# two apps: the instrument and the effect (tools/app-icon.ts builds the icon from the website's app icon)
@@ -212,8 +219,13 @@ if (WASM_CLANG_EXECUTABLE AND WASM_LD_EXECUTABLE)
 		target_include_directories(plugincircuit-plugin-param-events-test PRIVATE src)
 		target_link_libraries(plugincircuit-plugin-param-events-test PRIVATE plugincircuit-core)
 		add_dependencies(plugincircuit-plugin-param-events-test test-wclaps PluginCircuit_clap)
+		if (WIN32)
+			set(PLUGINCIRCUIT_CLAP_UNDER_TEST $<TARGET_FILE:PluginCircuit_clap>) # a .clap is a DLL on Windows
+		else()
+			set(PLUGINCIRCUIT_CLAP_UNDER_TEST ${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap) # a bundle
+		endif()
 		add_test(NAME plugin-param-events COMMAND plugincircuit-plugin-param-events-test
-			${CMAKE_BINARY_DIR}/plugins/PluginCircuit.clap ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz)
+			${PLUGINCIRCUIT_CLAP_UNDER_TEST} ${TEST_WCLAPS_DIR}/dist/test-param-events.wclap.tar.gz)
 	endif()
 	# load, process, parameters and state through Wasmtime, on every platform (smoke installs into its own home)
 	foreach(name test-gain test-sine test-lookahead)

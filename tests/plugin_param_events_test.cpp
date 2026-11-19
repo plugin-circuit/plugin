@@ -11,6 +11,7 @@
 //
 // Usage: plugincircuit-plugin-param-events-test <PluginCircuit.clap> <test-param-events.wclap.tar.gz>
 #include "core/Catalog.h"
+#include "core/Util.h"
 #include "plugin/StateCodec.h"
 
 #include <choc/text/choc_JSON.h>
@@ -23,13 +24,20 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <thread>
-#include <unistd.h>
+#include <random>
 #include <vector>
+
+#if defined(_WIN32)
+#	include <windows.h>
+static void setEnv(const char *name, const char *value) { _putenv_s(name, value); }
+#else
+#	include <dlfcn.h>
+static void setEnv(const char *name, const char *value) { setenv(name, value, 1); }
+#endif
 
 using namespace plugincircuit;
 
@@ -129,10 +137,12 @@ int main(int argc, char **argv) {
 		return 2;
 	}
 	// offline, in a scratch data folder
-	char home[] = "/tmp/plugincircuit-param-events-XXXXXX";
-	if (!mkdtemp(home)) return 1;
-	setenv("PLUGINCIRCUIT_HOME", home, 1);
-	setenv("PLUGINCIRCUIT_API", "http://127.0.0.1:9", 1); // nothing listens: the catalog is unreachable
+	const auto home = plugincircuit::fs::temp_directory_path() / ("plugincircuit-param-events-" + std::to_string(std::random_device{}()));
+	std::error_code ec;
+	plugincircuit::fs::create_directories(home, ec);
+	if (ec) return 1;
+	setEnv("PLUGINCIRCUIT_HOME", home.string().c_str());
+	setEnv("PLUGINCIRCUIT_API", "http://127.0.0.1:9"); // nothing listens: the catalog is unreachable
 
 	std::ifstream f(argv[2], std::ios::binary);
 	std::vector<uint8_t> archive((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -158,6 +168,14 @@ int main(int argc, char **argv) {
 	session.instance = choc::json::parse(R"({"view": "macros", "keyboardBase": 72})"); // instance settings (phase 4)
 
 	constexpr uint32_t frames = 256;
+#if defined(_WIN32)
+	HMODULE lib = LoadLibraryA(argv[1]); // a .clap is a DLL on Windows
+	if (!lib) {
+		std::printf("LoadLibrary failed: %lu\n", GetLastError());
+		return 1;
+	}
+	auto *entry = (const clap_plugin_entry *)GetProcAddress(lib, "clap_entry");
+#else
 	std::string bin = std::string(argv[1]) + "/Contents/MacOS/PluginCircuit";
 	void *lib = dlopen(bin.c_str(), RTLD_NOW);
 	if (!lib) {
@@ -165,6 +183,7 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	auto *entry = (const clap_plugin_entry *)dlsym(lib, "clap_entry");
+#endif
 	entry->init(argv[1]);
 	auto *factory = (const clap_plugin_factory *)entry->get_factory(CLAP_PLUGIN_FACTORY_ID);
 	// an instance of Plugin Circuit with the session loaded, processing
@@ -292,5 +311,5 @@ int main(int argc, char **argv) {
 	entry->deinit();
 	std::printf(failures ? "%d failure(s)\n" : "PASS: the table and the DAW follow the plugin's reported changes\n", failures);
 	std::fflush(stdout);
-	_exit(failures ? 1 : 0);
+	std::_Exit(failures ? 1 : 0);
 }

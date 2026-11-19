@@ -10,6 +10,7 @@
 namespace plugincircuit {
 
 class PluginCircuitPlugin;
+class EditorCore;
 
 class Editor {
 public:
@@ -36,8 +37,7 @@ public:
 	static constexpr uint32_t headerHeight = 56;
 
 private:
-	struct Impl;
-	std::unique_ptr<Impl> impl;
+	std::unique_ptr<EditorCore> impl; // EditorCore.h: the shared logic; Editor_mac.mm / Editor_win.cpp: the windows
 };
 
 } // namespace plugincircuit

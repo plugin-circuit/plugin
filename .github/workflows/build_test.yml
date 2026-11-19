@@ -2,8 +2,7 @@ name: build_test
 
 # Build and test on every push and pull request, with plugin-circuit/ci-actions (pinned).
 # macOS: everything (the plugin formats, the test WCLAPs, all tests but the GUI ones).
-# Windows: the core, the test WCLAPs (the runner's preinstalled LLVM) and their tests, until the editor is ported (docs/WINDOWS.md, W1-W3): the plugin target
-# doesn't build there yet.
+# Windows: the plugin (CLAP, VST3, standalone), the test WCLAPs (the runner's preinstalled LLVM) and the non-GUI tests.
 
 on:
   workflow_dispatch:
@@ -33,7 +32,7 @@ jobs:
           - name: Windows-x86_64
             os: windows-2022
             llvm: "false"
-            args: "-DPLUGINCIRCUIT_BUILD_PLUGIN=OFF"
+            args: ""
     steps:
       - uses: actions/checkout@v4
       - uses: plugin-circuit/ci-actions/setup-build-tools@v0.1.2

@@ -13,6 +13,12 @@ webview-gui is the bridge's GUI layer: it turns a WCLAP's web page into a native
 CHOC elsewhere), serves the page's files from the plugin and relays messages between the page and the DSP. It's a
 git submodule of the bridge (`modules/webview-gui`); our bridge fork points it at our webview-gui fork.
 
+## Patches without a fork
+
+| Patch | Module | Fix |
+| --- | --- | --- |
+| `cmake/patches/wclap-cpp-msvc-scoped.patch` | `wclap-cpp` (bridge submodule, upstream [WebCLAP/wclap-cpp](https://github.com/WebCLAP/wclap-cpp) `4ad3003`) | `MemoryArenaPool::scoped()`: take the arena reference before moving the `unique_ptr`; MSVC evaluated the move first and every WCLAP crashed on load on Windows. Applied by `CMakeLists.txt` after fetching the bridge (skipped when already applied). Drop it once upstream has the fix. |
+
 ## Updating
 
 Work in a checkout of the fork (e.g. `../external/wclap-bridge`), one commit per fix, push the `plugin-circuit`

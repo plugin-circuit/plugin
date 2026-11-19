@@ -39,8 +39,10 @@ Without a Windows machine in the loop, CI is how we find out what breaks.
       tests (param-table, gestures, api, settings, dropout-concealer, catalog-health, plugin-errors,
       plugin-param-events, main-thread-block with the test WCLAPs).
 - [x] Toolchain: MSVC (VS 2022, the default on the runner) first; clang-cl later if needed. C++20.
-- [ ] The test WCLAPs (`plugin/tests/wclaps`) need clang with the wasm32 target and `wasm-ld`: on Windows use LLVM
-      from the runner, or build them once on Linux/macOS and use the artifacts.
+- [x] The test WCLAPs (`plugin/tests/wclaps`) need clang with the wasm32 target and `wasm-ld`: built by
+      `tests/wclaps/build.cmake` with the runner's standalone LLVM (`C:\Program Files\LLVM`; Visual Studio's bundled
+      clang, first on PATH in a VS shell, has no wasm32 target). CI runs smoke-test-gain/sine/lookahead and
+      plugin-errors on them: 12 tests green on Windows (2026-11-19).
 - [ ] Cost: Actions minutes on private repos count double on Windows (2,000 free minutes a month on the Free plan);
       public repos are free. The plugin repo is private today.
 - [ ] Later: `windows-11-arm` (ARM64) runner, since Windows on Apple Silicon (Parallels) is ARM64.
@@ -56,7 +58,11 @@ From the backlog and a grep (verify each; don't assume):
 - [ ] Every `std::filesystem::path` to string conversion: UTF-8 on Windows needs `u8string()` / `path(u8string)`
       (user names with non-ASCII characters break `.string()`).
 - [x] tanh-net: the WinHTTP backend exists (`HttpClient_windows.cpp`); test HTTPS, redirects, proxies, progress.
-- [ ] Wasmtime C API for Windows x64 (and ARM64): check the bridge's CMake downloads the right archive.
+- [x] Wasmtime C API for Windows x64: the bridge downloads v39.0.1's `x86_64-windows-c-api.zip`; WCLAPs load, run
+      and trap correctly. ARM64: the bridge refuses non-AMD64 Windows (open).
+- [x] wclap-cpp's `MemoryArenaPool::scoped()` crashed under MSVC (`return {*arena, std::move(arena)}`: MSVC built
+      the by-value `unique_ptr` argument first, so the arena was null). Patched at configure time
+      (`cmake/patches/wclap-cpp-msvc-scoped.patch`, see UPSTREAM.md).
 - [ ] `realtime-lock.h` `cpuRelax` on MSVC (`_mm_pause` / `__yield`), `steady_clock` (QueryPerformanceCounter).
 - [ ] Compile cache folder, `settings.json` atomic rename (`MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`; is
       `std::filesystem::rename` enough over an existing file on Windows? verify), file locking during rename.

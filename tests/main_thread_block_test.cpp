@@ -81,6 +81,7 @@ int main(int argc, char **argv) {
 	std::string message = R"({"t":"render"})";
 	int conceal = -1;
 	std::string wavPath;
+	bool trace = false;
 	for (int i = 4; i + 1 < argc; i += 2) {
 		const std::string a = argv[i];
 		if (a == "--ratio") ratio = std::atof(argv[i + 1]);
@@ -89,6 +90,7 @@ int main(int argc, char **argv) {
 		else if (a == "--frames") frames = uint32_t(std::atoi(argv[i + 1]));
 		else if (a == "--conceal") conceal = std::atoi(argv[i + 1]);
 		else if (a == "--wav") wavPath = argv[i + 1];
+		else if (a == "--trace") trace = std::atoi(argv[i + 1]) != 0;
 	}
 	const bool hasWaitApi = true;
 	// a scratch Plugin Circuit folder: opening the bridge writes its compile-cache config and cleans the package cache
@@ -136,6 +138,7 @@ int main(int argc, char **argv) {
 	std::atomic<bool> running{true};
 	std::atomic<double> worstMs{0};
 	std::atomic<int> blocks{0}, lateBlocks{0};
+	std::vector<std::pair<int64_t, double>> late(64); // test only: (block, ms) of the first late blocks
 	// the left channel and which blocks were skipped (test only: allocated up front for 30 s)
 	std::vector<float> recorded(size_t(30 * 48000), 0.f);
 	std::vector<uint8_t> skippedFlags(recorded.size() / 16 + 1, 0);
@@ -159,7 +162,10 @@ int main(int argc, char **argv) {
 			inner->process(ins, 2, outs, 2, frames, b * frames, nullptr, &events.in, &events.out);
 			const double ms = std::chrono::duration<double, std::milli>(clock_type::now() - t0).count();
 			if (ms > worstMs) worstMs = ms;
-			if (ms > blockMs) ++lateBlocks; // a real device would have underrun: a click or a gap
+			if (ms > blockMs) { // a real device would have underrun: a click or a gap
+				if (size_t(lateBlocks) < late.size()) late[size_t(lateBlocks)] = {b, ms};
+				++lateBlocks;
+			}
 			if (hasWaitApi) {
 				static uint64_t lastSkipped = wclap_audio_skipped_blocks();
 				const uint64_t now = wclap_audio_skipped_blocks();
@@ -191,7 +197,10 @@ int main(int argc, char **argv) {
 		}
 	} else if (scenario == "state") {
 		std::vector<uint8_t> saved;
-		if (!inner->saveState(saved)) {
+		const auto s0 = clock_type::now();
+		const bool savedOk = inner->saveState(saved);
+		std::printf("save: %.1f ms\n", std::chrono::duration<double, std::milli>(clock_type::now() - s0).count());
+		if (!savedOk) {
 			std::fprintf(stderr, "saveState failed\n");
 			return 1;
 		}
@@ -266,6 +275,8 @@ int main(int argc, char **argv) {
 		f.write("RIFF", 4); u32(36 + bytes); f.write("WAVEfmt ", 8); u32(16); u16(3); u16(1); u32(uint32_t(sr)); u32(uint32_t(sr) * 4); u16(4); u16(32);
 		f.write("data", 4); u32(bytes); f.write(reinterpret_cast<const char *>(recorded.data()), bytes);
 	}
+	if (trace)
+		for (int i = 0; i < std::min(lateBlocks.load(), int(late.size())); ++i) std::printf("late block %lld: %.2f ms\n", (long long)late[size_t(i)].first, late[size_t(i)].second);
 	const bool ok = lateBlocks == 0;
 	std::printf("bridge: non-blocking, wait ratio %s, concealment %s\n", ratio < 0 ? "default" : std::to_string(ratio).c_str(),
 	            conceal < 0 ? "default" : (conceal ? "on" : "off"));

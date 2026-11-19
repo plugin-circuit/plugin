@@ -48,6 +48,14 @@ jobs:
       - uses: plugin-circuit/ci-actions/cmake-test@v0.1.2
         with:
           EXCLUDE_LABELS: gui
+      # the Windows plugins and apps, to try on a real machine (no installer or signing yet: docs/WINDOWS.md W8)
+      - name: upload Windows build
+        if: startsWith(matrix.name, 'Windows')
+        uses: actions/upload-artifact@v4
+        with:
+          name: PluginCircuit-${{ matrix.name }}
+          path: build/plugins/
+          retention-days: 14
       # a crash on Windows prints nothing: rerun one WCLAP test under cdb for the stack
       - name: crash stack (Windows)
         if: failure() && startsWith(matrix.name, 'Windows')

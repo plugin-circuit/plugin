@@ -1,6 +1,6 @@
 # Windows: the plugin, the SDK and the WCLAP features we don't support yet
 
-Status: W1 done, W2 in progress (2026-11-18). CI (`.github/workflows/build_test.yml`, with the shared actions in
+Status: W1 done, W2 mostly done, W3 started: the plugin (CLAP, VST3, standalone apps) builds on Windows and 13 tests pass in CI, untested on a real machine yet (2026-11-19). CI (`.github/workflows/build_test.yml`, with the shared actions in
 [plugin-circuit/ci-actions](https://github.com/plugin-circuit/ci-actions)) builds the core with MSVC on
 `windows-2022` and runs its 8 tests there (editor-layout, param-table, gestures, api, settings, package-cache,
 catalog-health with WinHTTP, dropout-concealer): green. The plugin target (`PLUGINCIRCUIT_BUILD_PLUGIN=OFF` there)
@@ -71,8 +71,13 @@ From the backlog and a grep (verify each; don't assume):
 
 ## W3. The editor on Windows (`Editor_win.cpp`)
 
-The macOS editor (`Editor.mm`) is the spec. Split what's portable (layout math is already in `EditorLayout.h`, the
-API registration, the timer logic) from AppKit code first, so both platforms share it.
+Done (2026-11-19): the editor is `EditorCore` (all logic: API, views, sizing, tick; `src/gui/EditorCore.*`) plus a
+platform part, `Editor_mac.mm` (AppKit) and `Editor_win.cpp` (Win32: a child window, our CHOC WebView2 view, a holder
+window above it for the inner GUI). macOS passes all GUI tests after the split. The Windows part compiles and links
+(static MSVC runtime project-wide, as clap-wrapper uses; `runtimeobject` for clap-wrapper's standalone) and CI
+uploads `build/plugins/` as an artifact; nobody has opened it on Windows yet. Inner WCLAP GUIs need the webview-gui
+fork's Windows `attach`/`setSize` (commit `c968e26`, not pushed or pinned yet). Open below: DPI, zoom for fixed-size
+webview GUIs, note keys from the inner GUI, the background colour.
 - [ ] Parent: CLAP gives an `HWND`; create a child window, our CHOC WebView (WebView2) for the header and views, and
       a child host for the WCLAP's own GUI (webview-gui's Windows backend gives it its `HWND`).
 - [ ] Layout and resize: `gui_set_size`, `adjust_size`, host-driven resizes, the keyboard strip growing the window
